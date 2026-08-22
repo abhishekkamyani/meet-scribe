@@ -114,14 +114,15 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true,
+        channelCount: 1
       },
       video: false
     });
     rawStreams.push(micStream);
-    console.log('[Offscreen] User microphone stream acquired.');
+    console.log('[Offscreen] User microphone stream acquired with high fidelity.');
   } catch (micErr) {
     console.warn('[Offscreen] Microphone not accessible, proceeding with tab audio only:', micErr);
   }
@@ -145,7 +146,7 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
   if (micStream && micStream.getAudioTracks().length > 0) {
     const micSource = activeAudioContext.createMediaStreamSource(micStream);
     const micGain = activeAudioContext.createGain();
-    micGain.gain.value = 1.2;
+    micGain.gain.value = 1.3;
     micSource.connect(micGain);
     micGain.connect(mixerDestination);
   }
@@ -153,9 +154,12 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
   // 4. Initialize MediaRecorder on the combined mixed stream
   mediaStream = mixerDestination.stream;
 
-  const options = { mimeType: 'audio/webm;codecs=opus' };
+  const options = {
+    mimeType: 'audio/webm;codecs=opus',
+    audioBitsPerSecond: 128000
+  };
   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-    mediaRecorder = new MediaRecorder(mediaStream);
+    mediaRecorder = new MediaRecorder(mediaStream, { audioBitsPerSecond: 128000 });
   } else {
     mediaRecorder = new MediaRecorder(mediaStream, options);
   }

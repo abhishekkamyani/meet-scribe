@@ -75,12 +75,13 @@ async function transcribeWithGroq(filePath, clientGroqKey) {
 
   console.log(`[Groq Whisper] Sending audio file (${filePath}) to Groq whisper-large-v3...`);
   
+  // High-accuracy bilingual transcription (allows natural Urdu, English, and code-switched Urdish)
   const transcription = await groq.audio.transcriptions.create({
     file: fileStream,
     model: 'whisper-large-v3',
-    language: 'ur',
     response_format: 'verbose_json',
-    temperature: 0.0
+    temperature: 0.0,
+    prompt: 'Bilingual Urdu, English, and Urdish speech from a corporate Google Meet meeting (اردو اور انگریزی گفتگو).'
   });
 
   const rawText = transcription.text ? transcription.text.trim() : '';
@@ -115,47 +116,41 @@ async function processWithGemini(rawTranscript, clientGeminiKey, participants = 
 
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const participantsHint = participantsList.length > 0
-    ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nIMPORTANT: Attribute dialogue turns to these participants when their speech occurs.`
-    : `PARTICIPANT INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara, etc.) from greetings, self-introductions, handovers, question-answer exchanges, and conversational context. If any speaker's real name is not mentioned or deducible, use "Speaker 1:", "Speaker 2:", etc. consistently.`;
+    ? `KNOWN MEETING ATTENDEES (from Google Meet tab):\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nIMPORTANT: Use these exact attendee names for dialogue speaker tags whenever they are speaking.`
+    : `SPEAKER INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara) from conversational cues, name calls, greetings, and introductions. If any speaker is not identifiable, use "Speaker 1:", "Speaker 2:" consistently.`;
 
-  const systemInstruction = `You are an elite bilingual AI meeting scribe specializing in corporate and professional Google Meet conversations (Urdu, English, and mixed 'Urdish').
+  const systemInstruction = `You are an elite bilingual linguistic expert and AI meeting transcriber specializing in Pakistani & international workplace conversations (Urdu, English, and mixed 'Urdish').
 
-Your mission is to convert raw speech-to-text transcripts into a STRICTLY FAITHFUL, DIALOGUE-STYLE, SPEAKER-BY-SPEAKER conversation transcript and accurate meeting minutes.
+Your task is to take the raw speech-to-text transcript from Groq Whisper and produce an ACCURATE, HIGH-FIDELITY, SPEAKER-DIARIZED bilingual record.
 
 ${participantsHint}
 
-CRITICAL RULES FOR TRANSCRIPTS:
-1. STRICT FIDELITY (DO NOT INVENT DIALOGUE):
-   - You must transcribe and translate ONLY the speech that actually occurred in the raw transcript.
-   - NEVER invent fictional topics, generic placeholder agendas, or fabricated discussion.
-   - If the audio is short or casual (e.g., "Hello, testing mic, can you hear me?"), reflect ONLY those spoken words.
+CORE RESPONSIBILITIES:
+1. FAITHFUL TRANSCRIPTION (DO NOT INVENT CONTENT):
+   - Every sentence must accurately reflect what was ACTUALLY spoken in the audio.
+   - Fix minor Speech-to-Text acoustic misinterpretations (e.g., technical terms, names, slang, mixed Urdish phrases) so sentences read grammatically and naturally in both languages.
+   - Do NOT invent fictional agendas, fake discussions, or generic corporate filler.
 
-2. DIALOGUE FORMAT (MANDATORY FOR BOTH URDU AND ENGLISH):
-   Every dialogue turn MUST start with the speaker's name followed by a colon.
-   
-   Example Format in Urdu:
-     ابھیشیک: السلام علیکم، کیا میری آواز آ رہی ہے؟
-     شعیب: جی ہاں، بالکل صاف آواز ہے۔
-   
-   Example Format in English:
-     Abhishek: Hello, can you hear my voice?
-     Shoaib: Yes, your voice is crystal clear.
+2. DUAL-LANGUAGE OUTPUTS:
+   - "transcript_urdu": Complete, natural verbatim conversation rendered cleanly in Urdu script (اردو رسم الخط / نستعلیق). Format every line as "Speaker Name: [Urdu dialogue]".
+   - "transcript_english": Complete, accurate, natural English translation of the entire conversation turn-by-turn. Format every line as "Speaker Name: [English dialogue]".
 
-3. ACTION ITEMS WITH EXPLICIT OWNERSHIP:
-   - Extract only tasks, commitments, or next steps that were ACTUALLY mentioned in the transcript.
-   - If no tasks were discussed, output:
-     In Urdu: "• اس گفتگو میں کوئی مخصوص ٹاسک یا ایکشن آئٹم زیرِ بحث نہیں آیا۔"
-     In English: "• No specific action items were discussed in this conversation."
+3. CONCRETE ACTION ITEMS:
+   - Extract only real commitments, decisions, tasks, or follow-ups mentioned in the speech.
+   - Format: "• [Responsible Person]: [Concrete action item or deliverable]"
+   - If no tasks were assigned, write:
+     Urdu: "• میٹنگ میں کوئی مخصوص ٹاسک یا ایکشن آئٹم تفویض نہیں کیا گیا۔"
+     English: "• No specific action items were assigned in this discussion."
 
 OUTPUT JSON SCHEMA:
 {
   "transcript_urdu": "Full speaker-wise dialogue transcript in Urdu script (e.g. 'ابھیشیک: ...\\nشعیب: ...')",
   "transcript_english": "Full speaker-wise dialogue translation in English (e.g. 'Abhishek: ...\\nShoaib: ...')",
-  "action_items_urdu": "Bullet-pointed tasks with owner names in Urdu (e.g. '• ابھیشیک: ...\\n• شعیب: ...')",
-  "action_items_english_improved": "Polished business English action items with owner names (e.g. '• Abhishek: ...\\n• Shoaib: ...')"
+  "action_items_urdu": "Bullet-pointed tasks with assigned person names in Urdu (e.g. '• ابھیشیک: ...\\n• شعیب: ...')",
+  "action_items_english_improved": "Polished business English action items with assigned person names (e.g. '• Abhishek: ...\\n• Shoaib: ...')"
 }
 
-CRITICAL: Return ONLY valid, parseable JSON. Do not wrap in markdown code blocks.`;
+CRITICAL: Output ONLY valid, parseable JSON matching the schema above.`;
 
   for (const modelName of modelCandidates) {
     try {
