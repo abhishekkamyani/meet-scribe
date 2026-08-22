@@ -277,8 +277,9 @@ function switchTab(tab) {
   }
 }
 
-// Download Helper
-async function triggerDownload(filename, content) {
+// Download Helper with Folder support
+async function triggerDownload(folderName, filename, content) {
+  const fullPath = folderName ? `${folderName}/${filename}` : filename;
   const utf8BOM = '\uFEFF';
   const blob = new Blob([utf8BOM + content], { type: 'text/plain;charset=utf-8' });
   const blobUrl = URL.createObjectURL(blob);
@@ -287,7 +288,7 @@ async function triggerDownload(filename, content) {
     try {
       await chrome.downloads.download({
         url: blobUrl,
-        filename: filename,
+        filename: fullPath,
         saveAs: false
       });
       return;
@@ -298,7 +299,7 @@ async function triggerDownload(filename, content) {
 
   const a = document.createElement('a');
   a.href = blobUrl;
-  a.download = filename;
+  a.download = fullPath;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -437,18 +438,21 @@ function setupEventListeners() {
     }
   });
 
-  // Re-download All Files
+  // Re-download All Files into a dedicated folder
   elements.downloadAllBtn.addEventListener('click', async () => {
     if (!currentResults) return;
-    const timestamp = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
+    const timeStr = String(now.getHours()).padStart(2, '0') + '-' + String(now.getMinutes()).padStart(2, '0');
+    const folderName = `MeetScribe_Urdu/Meeting_${dateStr}_${timeStr}`;
     
-    await triggerDownload(`1_transcript_urdu_${timestamp}.txt`, currentResults.transcript_urdu || '');
+    await triggerDownload(folderName, '1_transcript_urdu.txt', currentResults.transcript_urdu || '');
     await new Promise(r => setTimeout(r, 250));
-    await triggerDownload(`2_transcript_english_${timestamp}.txt`, currentResults.transcript_english || '');
+    await triggerDownload(folderName, '2_transcript_english.txt', currentResults.transcript_english || '');
     await new Promise(r => setTimeout(r, 250));
-    await triggerDownload(`3_action_items_urdu_${timestamp}.txt`, currentResults.action_items_urdu || '');
+    await triggerDownload(folderName, '3_action_items_urdu.txt', currentResults.action_items_urdu || '');
     await new Promise(r => setTimeout(r, 250));
-    await triggerDownload(`4_action_items_english_improved_${timestamp}.txt`, currentResults.action_items_english_improved || '');
+    await triggerDownload(folderName, '4_action_items_english_improved.txt', currentResults.action_items_english_improved || '');
   });
 
   // Record Another Meeting

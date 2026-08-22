@@ -15,64 +15,65 @@ let currentBackendUrl = 'http://localhost:3000';
 let userGroqApiKey = '';
 let userGeminiApiKey = '';
 
-// Trigger download of a text file in UTF-8 using DOM Anchor in offscreen document
-async function downloadTextFile(filename, content) {
-  // UTF-8 BOM ensures Windows/Notepad and all text editors recognize Urdu characters correctly
-  const utf8BOM = '\uFEFF';
-  const blob = new Blob([utf8BOM + (content || '')], { type: 'text/plain;charset=utf-8' });
+// Trigger download into a specific folder in Downloads
+async function downloadFileToFolder(folderName, filename, blob) {
+  const fullPath = folderName ? `${folderName}/${filename}` : filename;
   const blobUrl = URL.createObjectURL(blob);
 
-  // Use DOM Anchor download
+  // 1. Try sending to background service worker for native folder creation in Downloads
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'EXECUTE_DOWNLOAD',
+      filename: fullPath,
+      url: blobUrl
+    });
+    if (res && res.success) {
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+      return;
+    }
+  } catch (e) {
+    // Fall through to DOM fallback
+  }
+
+  // 2. DOM Anchor fallback
   const a = document.createElement('a');
   a.href = blobUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  // Clean up blob URL after download starts
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
-}
-
-// Trigger download of a binary or blob file (e.g. WebM audio)
-async function downloadBlobFile(filename, blob) {
-  const blobUrl = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = blobUrl;
-  a.download = filename;
+  a.download = fullPath;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
 }
 
-// Download the recorded audio AND the 4 distinct meeting notes files
+// Download the recorded audio AND the 4 distinct meeting notes files into a dedicated subfolder
 async function triggerAllDownloads(data, audioBlob) {
-  const timestamp = new Date().toISOString().slice(0, 10);
-  const timeSuffix = Date.now().toString().slice(-4);
-  const baseName = `${timestamp}_${timeSuffix}`;
-  
-  console.log('[Offscreen] Initiating download of audio recording and 4 meeting output files...');
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10);
+  const timeStr = String(now.getHours()).padStart(2, '0') + '-' + String(now.getMinutes()).padStart(2, '0');
+  const folderName = `MeetScribe_Urdu/Meeting_${dateStr}_${timeStr}`;
 
-  // 1. Download the original recorded .webm audio file
+  console.log(`[Offscreen] Initiating download of audio and notes into folder: ${folderName}...`);
+
+  // 1. Download the original recorded .webm audio file into folder
   if (audioBlob && audioBlob.size > 0) {
-    console.log(`[Offscreen] Downloading recorded audio (${audioBlob.size} bytes)...`);
-    await downloadBlobFile(`0_meeting_audio_${baseName}.webm`, audioBlob);
-    await new Promise(resolve => setTimeout(resolve, 400));
+    console.log(`[Offscreen] Downloading recorded audio into ${folderName}/0_meeting_audio.webm...`);
+    await downloadFileToFolder(folderName, '0_meeting_audio.webm', audioBlob);
+    await new Promise(resolve => setTimeout(resolve, 350));
   }
 
-  // 2. Download the 4 structured text files
+  // 2. Download the 4 structured text files into folder
+  const utf8BOM = '\uFEFF';
   const files = [
-    { name: `1_transcript_urdu_${baseName}.txt`, content: data.transcript_urdu || '' },
-    { name: `2_transcript_english_${baseName}.txt`, content: data.transcript_english || '' },
-    { name: `3_action_items_urdu_${baseName}.txt`, content: data.action_items_urdu || '' },
-    { name: `4_action_items_english_improved_${baseName}.txt`, content: data.action_items_english_improved || '' }
+    { name: '1_transcript_urdu.txt', content: data.transcript_urdu || '' },
+    { name: '2_transcript_english.txt', content: data.transcript_english || '' },
+    { name: '3_action_items_urdu.txt', content: data.action_items_urdu || '' },
+    { name: '4_action_items_english_improved.txt', content: data.action_items_english_improved || '' }
   ];
 
   for (const file of files) {
-    await downloadTextFile(file.name, file.content);
-    // Delay between downloads to ensure browser registers each file
-    await new Promise(resolve => setTimeout(resolve, 350));
+    const textBlob = new Blob([utf8BOM + (file.content || '')], { type: 'text/plain;charset=utf-8' });
+    await downloadFileToFolder(folderName, file.name, textBlob);
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
 }
 
@@ -213,8 +214,10 @@ async function processAndUploadAudio() {
     try {
       const fallbackAudio = new Blob(recordedChunks, { type: 'audio/webm' });
       if (fallbackAudio && fallbackAudio.size > 0) {
-        const timestamp = new Date().toISOString().slice(0, 10);
-        await downloadBlobFile(`0_meeting_audio_${timestamp}_backup.webm`, fallbackAudio);
+        const now = new Date();
+        const dateStr = now.toISOString().slice(0, 10);
+        const folderName = `MeetScribe_Urdu/Backup_${dateStr}`;
+        await downloadFileToFolder(folderName, '0_meeting_audio_backup.webm', fallbackAudio);
       }
     } catch (saveErr) {
       console.warn('[Offscreen] Could not save fallback audio:', saveErr);

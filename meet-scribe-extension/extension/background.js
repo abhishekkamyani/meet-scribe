@@ -100,6 +100,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         sendResponse({ success: true });
 
+      } else if (message.type === 'EXECUTE_DOWNLOAD') {
+        // Native folder-structured download
+        const { filename, url } = message;
+        if (url && filename) {
+          await chrome.downloads.download({
+            url: url,
+            filename: filename,
+            saveAs: false
+          });
+        }
+        sendResponse({ success: true });
+
       } else if (message.type === 'OFFSCREEN_STATUS_UPDATE') {
         // Offscreen document updates state
         if (message.state === 'processing') {
