@@ -66,7 +66,7 @@ const elements = {
 let timerInterval = null;
 let currentResults = null;
 let activeTabType = 'ur-trans';
-let defaultBackendUrl = 'http://localhost:3000';
+let defaultBackendUrl = 'https://meet-scribe-five.vercel.app';
 let userGroqKey = '';
 let userGeminiKey = '';
 
@@ -92,7 +92,7 @@ async function ensureMicrophonePermission(interactive = false) {
 document.addEventListener('DOMContentLoaded', async () => {
   // 1. Load saved settings & API keys
   const savedData = await chrome.storage.local.get(['backendUrl', 'groqApiKey', 'geminiApiKey']);
-  defaultBackendUrl = savedData.backendUrl || 'http://localhost:3000';
+  defaultBackendUrl = savedData.backendUrl || 'https://meet-scribe-five.vercel.app';
   userGroqKey = savedData.groqApiKey || '';
   userGeminiKey = savedData.geminiApiKey || '';
 

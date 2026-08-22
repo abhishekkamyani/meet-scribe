@@ -82,7 +82,7 @@ let rawStreams = [];
 
 // Start tab recording with dual-channel (Tab Audio + User Microphone) mixing and audio passthrough
 async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
-  currentBackendUrl = backendUrl || 'http://localhost:3000';
+  currentBackendUrl = backendUrl || 'https://meet-scribe-five.vercel.app';
   userGroqApiKey = groqKey || '';
   userGeminiApiKey = geminiKey || '';
   recordedChunks = [];

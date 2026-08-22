@@ -14,6 +14,8 @@
   ],
   "host_permissions": [
     "https://meet.google.com/*",
+    "https://meet-scribe-five.vercel.app/*",
+    "https://*.vercel.app/*",
     "http://localhost:*/*",
     "http://127.0.0.1:*/*"
   ],
