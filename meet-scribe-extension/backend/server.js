@@ -60,8 +60,8 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
+// Health check endpoints (supports both /api/health and /health)
+app.get(['/api/health', '/health'], (req, res) => {
   const groqConfigured = Boolean(process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== 'your_groq_api_key_here');
   const geminiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_gemini_api_key_here');
   
@@ -353,7 +353,7 @@ OUTPUT JSON SCHEMA:
 }
 
 // Main meeting processing endpoint (Dual-Engine: Direct Multimodal Audio with Groq Fallback)
-app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
+app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), async (req, res) => {
   const uploadedFile = req.file;
 
   if (!uploadedFile) {

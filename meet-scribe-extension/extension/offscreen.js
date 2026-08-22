@@ -246,11 +246,11 @@ async function processAndUploadAudio() {
     const headers = {};
     if (userGroqApiKey) headers['X-Groq-API-Key'] = userGroqApiKey;
     if (userGeminiApiKey) headers['X-Gemini-API-Key'] = userGeminiApiKey;
-
-    console.log(`[Offscreen] Sending POST request to: ${currentBackendUrl}/api/process-meeting (with participants: ${activeParticipants.join(', ') || 'inferred'})`);
+    const cleanBaseUrl = (currentBackendUrl || 'https://meet-scribe-five.vercel.app').trim().replace(/\/+$/, '');
+    console.log(`[Offscreen] Sending POST request to: ${cleanBaseUrl}/api/process-meeting (with participants: ${activeParticipants.join(', ') || 'inferred'})`);
     
     // Direct fetch from offscreen document (bypasses service worker timeout!)
-    const response = await fetch(`${currentBackendUrl}/api/process-meeting`, {
+    const response = await fetch(`${cleanBaseUrl}/api/process-meeting`, {
       method: 'POST',
       headers: headers,
       body: formData

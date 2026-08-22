@@ -154,21 +154,25 @@ async function checkActiveTab() {
 
 // Check if Express backend is running and keys are configured
 async function checkBackendHealth(url) {
-  const portsToTry = [url];
-  if (!url.includes(':3001')) portsToTry.push('http://localhost:3001');
-  if (!url.includes(':3000')) portsToTry.push('http://localhost:3000');
+  const cleanGivenUrl = (url || 'https://meet-scribe-five.vercel.app').trim().replace(/\/+$/, '');
+  const portsToTry = [cleanGivenUrl];
+  if (!cleanGivenUrl.includes('vercel.app')) {
+    if (!cleanGivenUrl.includes(':3001')) portsToTry.push('http://localhost:3001');
+    if (!cleanGivenUrl.includes(':3000')) portsToTry.push('http://localhost:3000');
+  }
 
   for (const testUrl of portsToTry) {
     try {
-      const res = await fetch(`${testUrl}/api/health`, { method: 'GET' });
+      const cleanTest = testUrl.trim().replace(/\/+$/, '');
+      const res = await fetch(`${cleanTest}/api/health`, { method: 'GET' });
       if (res.ok) {
         const data = await res.json();
         
         // If detected on a fallback port, update active URL
-        if (testUrl !== url) {
-          defaultBackendUrl = testUrl;
-          elements.backendUrlInput.value = testUrl;
-          await chrome.storage.local.set({ backendUrl: testUrl });
+        if (cleanTest !== cleanGivenUrl) {
+          defaultBackendUrl = cleanTest;
+          elements.backendUrlInput.value = cleanTest;
+          await chrome.storage.local.set({ backendUrl: cleanTest });
         }
 
         // Keys are valid if either backend has .env configured OR user entered them in popup
