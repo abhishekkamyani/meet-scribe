@@ -141,10 +141,13 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
     tabSource.connect(activeAudioContext.destination);
   }
 
-  // Connect Mic Audio to Mixer ONLY (do NOT connect to speakers to avoid echo)
+  // Connect Mic Audio to Mixer ONLY with Gain Boost (do NOT connect to speakers to avoid echo)
   if (micStream && micStream.getAudioTracks().length > 0) {
     const micSource = activeAudioContext.createMediaStreamSource(micStream);
-    micSource.connect(mixerDestination);
+    const micGain = activeAudioContext.createGain();
+    micGain.gain.value = 1.2;
+    micSource.connect(micGain);
+    micGain.connect(mixerDestination);
   }
 
   // 4. Initialize MediaRecorder on the combined mixed stream

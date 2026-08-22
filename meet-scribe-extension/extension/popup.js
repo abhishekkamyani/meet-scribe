@@ -25,6 +25,7 @@ const elements = {
   toggleGeminiKeyBtn: document.getElementById('toggle-gemini-key-btn'),
   settingsSavedIndicator: document.getElementById('settings-saved-indicator'),
   missingKeysAlert: document.getElementById('missing-keys-alert'),
+  micPermissionAlert: document.getElementById('mic-permission-alert'),
   saveSettingsBtn: document.getElementById('save-settings-btn'),
   notMeetAlert: document.getElementById('not-meet-alert'),
 
@@ -69,6 +70,23 @@ let defaultBackendUrl = 'http://localhost:3000';
 let userGroqKey = '';
 let userGeminiKey = '';
 
+// Request / Verify Microphone Permission in the Popup Window
+async function ensureMicrophonePermission(interactive = false) {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());
+    if (elements.micPermissionAlert) elements.micPermissionAlert.classList.add('hidden');
+    return true;
+  } catch (err) {
+    console.warn('Microphone permission check:', err);
+    if (elements.micPermissionAlert) elements.micPermissionAlert.classList.remove('hidden');
+    if (interactive) {
+      alert('Microphone permission is required to capture your voice during the meeting. Please allow microphone access.');
+    }
+    return false;
+  }
+}
+
 // Initialize Popup
 document.addEventListener('DOMContentLoaded', async () => {
   // 1. Load saved settings & API keys
@@ -83,6 +101,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Show onboarding prompt if keys are missing
   checkMissingKeys(userGroqKey, userGeminiKey);
+
+  // Check microphone access
+  await ensureMicrophonePermission(false);
 
   // 2. Check active tab
   await checkActiveTab();
@@ -327,6 +348,13 @@ function setupEventListeners() {
     });
   }
 
+  // Mic Permission Alert Click
+  if (elements.micPermissionAlert) {
+    elements.micPermissionAlert.addEventListener('click', async () => {
+      await ensureMicrophonePermission(true);
+    });
+  }
+
   // Toggle Groq Key Visibility
   if (elements.toggleGroqKeyBtn) {
     elements.toggleGroqKeyBtn.addEventListener('click', () => {
@@ -380,7 +408,13 @@ function setupEventListeners() {
 
   // Start Recording
   elements.startRecordingBtn.addEventListener('click', async () => {
-    // Check if keys are set
+    // 1. Ensure microphone permission is granted in extension context
+    const micGranted = await ensureMicrophonePermission(true);
+    if (!micGranted) {
+      return;
+    }
+
+    // 2. Check if keys are set
     const data = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
     const groqKey = data.groqApiKey || userGroqKey;
     const geminiKey = data.geminiApiKey || userGeminiKey;
