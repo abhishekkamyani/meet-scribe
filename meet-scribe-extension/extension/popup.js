@@ -18,7 +18,6 @@ const elements = {
   statusText: document.getElementById('status-text'),
   toggleSettingsBtn: document.getElementById('toggle-settings-btn'),
   settingsPanel: document.getElementById('settings-panel'),
-  backendUrlInput: document.getElementById('backend-url-input'),
   groqApiKeyInput: document.getElementById('groq-api-key-input'),
   geminiApiKeyInput: document.getElementById('gemini-api-key-input'),
   toggleGroqKeyBtn: document.getElementById('toggle-groq-key-btn'),
@@ -63,10 +62,11 @@ const elements = {
   errorRetryBtn: document.getElementById('error-retry-btn')
 };
 
+const OFFICIAL_BACKEND_URL = 'https://meet-scribe-five.vercel.app';
 let timerInterval = null;
 let currentResults = null;
 let activeTabType = 'ur-trans';
-let defaultBackendUrl = 'https://meet-scribe-five.vercel.app';
+let defaultBackendUrl = OFFICIAL_BACKEND_URL;
 let userGroqKey = '';
 let userGeminiKey = '';
 
@@ -90,20 +90,13 @@ async function ensureMicrophonePermission(interactive = false) {
 
 // Initialize Popup
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Load saved settings & API keys (Auto-migrates from localhost to live production Vercel)
-  const savedData = await chrome.storage.local.get(['backendUrl', 'groqApiKey', 'geminiApiKey']);
+  // 1. Load saved API keys (Backend URL is managed / locked to production)
+  const savedData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
   
-  let activeUrl = savedData.backendUrl;
-  if (!activeUrl || activeUrl.includes('localhost') || activeUrl.includes('127.0.0.1')) {
-    activeUrl = 'https://meet-scribe-five.vercel.app';
-    await chrome.storage.local.set({ backendUrl: activeUrl });
-  }
-
-  defaultBackendUrl = activeUrl;
+  defaultBackendUrl = OFFICIAL_BACKEND_URL;
   userGroqKey = savedData.groqApiKey || '';
   userGeminiKey = savedData.geminiApiKey || '';
 
-  elements.backendUrlInput.value = defaultBackendUrl;
   if (userGroqKey) elements.groqApiKeyInput.value = userGroqKey;
   if (userGeminiKey) elements.geminiApiKeyInput.value = userGeminiKey;
 
@@ -117,7 +110,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await checkActiveTab();
 
   // 3. Check backend health
-  checkBackendHealth(defaultBackendUrl);
+  checkBackendHealth(OFFICIAL_BACKEND_URL);
 
   // 4. Restore state
   await restoreState();
@@ -385,19 +378,17 @@ function setupEventListeners() {
     });
   }
 
-  // Save settings (including API keys)
+  // Save settings (API keys only - server is managed)
   elements.saveSettingsBtn.addEventListener('click', async () => {
-    const url = elements.backendUrlInput.value.trim() || 'http://localhost:3000';
     const groqKey = elements.groqApiKeyInput.value.trim();
     const geminiKey = elements.geminiApiKeyInput.value.trim();
 
     await chrome.storage.local.set({
-      backendUrl: url,
       groqApiKey: groqKey,
       geminiApiKey: geminiKey
     });
 
-    defaultBackendUrl = url;
+    defaultBackendUrl = OFFICIAL_BACKEND_URL;
     userGroqKey = groqKey;
     userGeminiKey = geminiKey;
 
@@ -415,7 +406,7 @@ function setupEventListeners() {
       elements.settingsPanel.classList.add('hidden');
     }, 800);
 
-    checkBackendHealth(url);
+    checkBackendHealth(OFFICIAL_BACKEND_URL);
   });
 
   // Start Recording
@@ -445,7 +436,7 @@ function setupEventListeners() {
 
     chrome.runtime.sendMessage({
       type: 'START_RECORDING',
-      backendUrl: defaultBackendUrl,
+      backendUrl: OFFICIAL_BACKEND_URL,
       groqApiKey: groqKey,
       geminiApiKey: geminiKey
     }, (response) => {
