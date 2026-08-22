@@ -101,7 +101,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await ensureOffscreenDocument();
 
         // 3. Send START message to offscreen document with user API keys
-        const backendUrl = message.backendUrl || 'http://localhost:3000';
+        const backendUrl = message.backendUrl || 'https://meet-scribe-five.vercel.app';
         const storageData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
         const groqApiKey = message.groqApiKey || storageData.groqApiKey || '';
         const geminiApiKey = message.geminiApiKey || storageData.geminiApiKey || '';
