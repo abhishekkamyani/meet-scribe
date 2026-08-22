@@ -1,4 +1,4 @@
-require('dotenv').config();
+const os = require('os');
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -19,16 +19,23 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Setup temp directory for audio files
-const TEMP_DIR = path.join(__dirname, 'temp_recordings');
-if (!fs.existsSync(TEMP_DIR)) {
-  fs.mkdirSync(TEMP_DIR, { recursive: true });
+// Setup temp directory for audio files (Vercel uses /tmp which is the only writable directory on AWS Lambda)
+const isVercel = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const TEMP_DIR = isVercel ? path.join(os.tmpdir(), 'temp_recordings') : path.join(__dirname, 'temp_recordings');
+
+try {
+  if (!fs.existsSync(TEMP_DIR)) {
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
+  }
+} catch (dirErr) {
+  console.warn('[MeetScribe] Note on temp directory:', dirErr.message);
 }
 
-// Configure Multer storage (Supports up to 500MB for 4+ hour long meetings)
+// Configure Multer storage (Supports both local disk & Vercel /tmp)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, TEMP_DIR);
+    const targetDir = fs.existsSync(TEMP_DIR) ? TEMP_DIR : os.tmpdir();
+    cb(null, targetDir);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
@@ -39,8 +46,18 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB limit (easily accommodates 4+ hours of audio)
+    fileSize: 500 * 1024 * 1024 // 500MB limit (easily accommodates long meetings)
   }
+});
+
+// Root endpoint for status / health probe
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'MeetScribe Urdu API (Vercel Serverless Ready)',
+    health: '/api/health',
+    process: '/api/process-meeting'
+  });
 });
 
 // Health check endpoint
@@ -404,7 +421,10 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
   }
 });
 
-// Function to start server with automatic port discovery
+// Export app for Vercel Serverless deployments
+module.exports = app;
+
+// Function to start server with automatic port discovery (when running standalone)
 function startServer(portToTry, attemptsLeft = 10) {
   const srv = app.listen(portToTry, () => {
     console.log(`===================================================`);
@@ -429,6 +449,9 @@ function startServer(portToTry, attemptsLeft = 10) {
   });
 }
 
-startServer(Number(PORT) || 3000);
+// Only start standalone server if executed directly (Local / Render / Koyeb)
+if (require.main === module || !process.env.VERCEL) {
+  startServer(Number(PORT) || 3000);
+}
 
 
