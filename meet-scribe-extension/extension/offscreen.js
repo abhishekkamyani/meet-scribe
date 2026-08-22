@@ -168,6 +168,8 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
 
   mediaRecorder.onstop = async () => {
     console.log(`[Offscreen] MediaRecorder stopped. Total chunks: ${recordedChunks.length}`);
+    // Clean up audio graph only after all chunks are received
+    cleanUpAudioStreams();
     await processAndUploadAudio();
   };
 
@@ -176,14 +178,9 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
   console.log('[Offscreen] Dual-channel recording (Tab Audio + User Mic) active.');
 }
 
-// Stop recording and close streams
-async function stopRecording() {
-  console.log('[Offscreen] Stopping recording...');
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
-
-  // Stop all raw audio tracks (tab and mic)
+// Clean up audio streams and context
+function cleanUpAudioStreams() {
+  console.log('[Offscreen] Cleaning up audio tracks and audio context...');
   if (rawStreams && rawStreams.length > 0) {
     rawStreams.forEach(stream => {
       if (stream) {
@@ -195,11 +192,25 @@ async function stopRecording() {
 
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
+    mediaStream = null;
   }
 
-  // Close audio context
   if (activeAudioContext && activeAudioContext.state !== 'closed') {
-    await activeAudioContext.close();
+    activeAudioContext.close().catch(() => {});
+    activeAudioContext = null;
+  }
+}
+
+// Stop recording safely
+async function stopRecording() {
+  console.log('[Offscreen] Stopping recording...');
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try {
+      mediaRecorder.requestData();
+    } catch (e) {}
+    mediaRecorder.stop();
+  } else {
+    cleanUpAudioStreams();
   }
 }
 

@@ -80,12 +80,11 @@ async function transcribeWithGroq(filePath, clientGroqKey) {
     model: 'whisper-large-v3',
     language: 'ur',
     response_format: 'verbose_json',
-    temperature: 0.0,
-    prompt: 'Urdu and English speech from Google Meet meeting transcript. گفتگو، کام، میٹنگ، پروجیکٹ، ٹاسک، فیصلہ، ذمہ داری، اگلا لائحہ عمل'
+    temperature: 0.0
   });
 
   const rawText = transcription.text ? transcription.text.trim() : '';
-  console.log(`[Groq Whisper] Transcription complete. Length: ${rawText.length} characters.`);
+  console.log(`[Groq Whisper] Raw transcription received: "${rawText}" (Length: ${rawText.length} characters)`);
   return rawText;
 }
 
@@ -116,45 +115,43 @@ async function processWithGemini(rawTranscript, clientGeminiKey, participants = 
 
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const participantsHint = participantsList.length > 0
-    ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nIMPORTANT: Use these exact participant names for speaker turns when their dialogue occurs in the conversation.`
-    : `PARTICIPANT INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara, etc.) from greetings, self-introductions, handovers ("Over to you Shoaib", "Thanks Abhishek"), question-answer exchanges, and conversational context. If any speaker's real name is not mentioned or deducible, use "Speaker 1:", "Speaker 2:", etc. consistently.`;
+    ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nIMPORTANT: Attribute dialogue turns to these participants when their speech occurs.`
+    : `PARTICIPANT INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara, etc.) from greetings, self-introductions, handovers, question-answer exchanges, and conversational context. If any speaker's real name is not mentioned or deducible, use "Speaker 1:", "Speaker 2:", etc. consistently.`;
 
-  const systemInstruction = `You are an elite bilingual AI meeting scribe and linguistic expert specializing in corporate and professional Google Meet conversations (Urdu, English, and mixed 'Urdish').
+  const systemInstruction = `You are an elite bilingual AI meeting scribe specializing in corporate and professional Google Meet conversations (Urdu, English, and mixed 'Urdish').
 
-Your mission is to convert raw speech-to-text transcripts into a POLISHED, DIALOGUE-STYLE, SPEAKER-BY-SPEAKER conversation transcript and actionable meeting minutes.
+Your mission is to convert raw speech-to-text transcripts into a STRICTLY FAITHFUL, DIALOGUE-STYLE, SPEAKER-BY-SPEAKER conversation transcript and accurate meeting minutes.
 
 ${participantsHint}
 
 CRITICAL RULES FOR TRANSCRIPTS:
-1. DIALOGUE FORMAT (MANDATORY FOR BOTH URDU AND ENGLISH):
+1. STRICT FIDELITY (DO NOT INVENT DIALOGUE):
+   - You must transcribe and translate ONLY the speech that actually occurred in the raw transcript.
+   - NEVER invent fictional topics, generic placeholder agendas, or fabricated discussion.
+   - If the audio is short or casual (e.g., "Hello, testing mic, can you hear me?"), reflect ONLY those spoken words.
+
+2. DIALOGUE FORMAT (MANDATORY FOR BOTH URDU AND ENGLISH):
    Every dialogue turn MUST start with the speaker's name followed by a colon.
    
    Example Format in Urdu:
-     ابھیشیک: السلام علیکم شعیب، کیا حال ہے؟
-     شعیب: وعلیکم السلام، میں بالکل ٹھیک ہوں۔ پروجیکٹ کا کام کہاں تک پہنچا؟
-     ساحل: ہیلو سب کو، میں نے اے پی آئی انٹیگریشن مکمل کر لی ہے۔
+     ابھیشیک: السلام علیکم، کیا میری آواز آ رہی ہے؟
+     شعیب: جی ہاں، بالکل صاف آواز ہے۔
    
    Example Format in English:
-     Abhishek: Hey Shoaib, how are you?
-     Shoaib: I am good. How far has the project progressed?
-     Sahil: Hello guys, I have completed the API integration.
-
-2. SPEAKER DIARIZATION & FLOW:
-   - Carefully detect speaker transitions, question-and-answer pairs, greetings, and turn-taking.
-   - Clean up audio stutter or minor STT acoustic errors while preserving 100% of the conversational meaning.
-   - Keep technical terms (e.g., 'API', 'Sprint', 'Deployment', 'Database', 'PR') in accurate context.
+     Abhishek: Hello, can you hear my voice?
+     Shoaib: Yes, your voice is crystal clear.
 
 3. ACTION ITEMS WITH EXPLICIT OWNERSHIP:
-   - Every single action item MUST explicitly assign ownership to the responsible participant!
-   - Format: "• [Responsible Person]: [Specific action, decision, or deliverable with deadline if mentioned]"
-   - Example in Urdu: "• ساحل: کل شام تک ڈیٹا بیس مائیگریشن اور اے پی آئی ٹیسٹنگ مکمل کرنا۔"
-   - Example in English: "• Sahil: Complete the database migration and API testing by tomorrow evening."
+   - Extract only tasks, commitments, or next steps that were ACTUALLY mentioned in the transcript.
+   - If no tasks were discussed, output:
+     In Urdu: "• اس گفتگو میں کوئی مخصوص ٹاسک یا ایکشن آئٹم زیرِ بحث نہیں آیا۔"
+     In English: "• No specific action items were discussed in this conversation."
 
 OUTPUT JSON SCHEMA:
 {
   "transcript_urdu": "Full speaker-wise dialogue transcript in Urdu script (e.g. 'ابھیشیک: ...\\nشعیب: ...')",
   "transcript_english": "Full speaker-wise dialogue translation in English (e.g. 'Abhishek: ...\\nShoaib: ...')",
-  "action_items_urdu": "Bullet-pointed list of tasks with owner names in Urdu (e.g. '• ابھیشیک: ...\\n• شعیب: ...')",
+  "action_items_urdu": "Bullet-pointed tasks with owner names in Urdu (e.g. '• ابھیشیک: ...\\n• شعیب: ...')",
   "action_items_english_improved": "Polished business English action items with owner names (e.g. '• Abhishek: ...\\n• Shoaib: ...')"
 }
 
