@@ -241,7 +241,13 @@ async function restoreState() {
     populateResults(data.lastResults);
   } else if (state === 'error') {
     showView('error');
-    elements.errorMessageText.textContent = data.lastError || 'An error occurred during meeting recording or transcription.';
+    const err = data.lastError || '';
+    const isNetworkErr = err.includes('Failed to fetch') || err.includes('network') || err.includes('offline');
+    if (isNetworkErr) {
+      elements.errorMessageText.textContent = 'Internet connection lost. Your complete meeting audio has been safely saved to your Downloads folder (MeetScribe_Urdu/Backup_...).';
+    } else {
+      elements.errorMessageText.textContent = err || 'An error occurred during meeting recording or transcription.';
+    }
   } else {
     showView('idle');
   }
