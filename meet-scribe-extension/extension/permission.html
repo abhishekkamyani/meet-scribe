@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MeetScribe Urdu — Microphone Permission</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card: #131b2e;
+      --primary: #10b981;
+      --primary-hover: #059669;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid #24324f;
+      border-radius: 16px;
+      padding: 36px 32px;
+      max-width: 440px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    .icon-box {
+      width: 64px;
+      height: 64px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #10b981, #0d9488);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      margin: 0 auto 20px;
+      box-shadow: 0 4px 20px rgba(16, 185, 129, 0.3);
+    }
+    h1 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    p {
+      font-size: 13.5px;
+      color: var(--text-muted);
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    .btn {
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      width: 100%;
+      transition: all 0.2s;
+    }
+    .btn:hover {
+      background: var(--primary-hover);
+    }
+    .status-msg {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #34d399;
+      font-weight: 600;
+    }
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon-box">🎙️</div>
+    <h1>Microphone Access Required</h1>
+    <p>
+      Please click the button below and select <strong>"Allow"</strong> on Chrome's prompt so <strong>MeetScribe Urdu</strong> can record your voice alongside Google Meet tab audio.
+    </p>
+
+    <button id="grant-mic-btn" class="btn">Allow Microphone Access</button>
+    <div id="status-success" class="status-msg hidden">✅ Microphone permission granted! Closing...</div>
+  </div>
+
+  <script src="permission.js"></script>
+</body>
+</html>

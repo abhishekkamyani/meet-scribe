@@ -70,7 +70,7 @@ let defaultBackendUrl = 'http://localhost:3000';
 let userGroqKey = '';
 let userGeminiKey = '';
 
-// Request / Verify Microphone Permission in the Popup Window
+// Request / Verify Microphone Permission
 async function ensureMicrophonePermission(interactive = false) {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -78,10 +78,11 @@ async function ensureMicrophonePermission(interactive = false) {
     if (elements.micPermissionAlert) elements.micPermissionAlert.classList.add('hidden');
     return true;
   } catch (err) {
-    console.warn('Microphone permission check:', err);
+    console.warn('Microphone permission check:', err.name, err.message);
     if (elements.micPermissionAlert) elements.micPermissionAlert.classList.remove('hidden');
     if (interactive) {
-      alert('Microphone permission is required to capture your voice during the meeting. Please allow microphone access.');
+      // Open dedicated full-tab permission page (prevents popup cut-off/closing!)
+      chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') });
     }
     return false;
   }
