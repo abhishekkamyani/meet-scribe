@@ -149,12 +149,19 @@ async function checkBackendHealth(url) {
           await chrome.storage.local.set({ backendUrl: testUrl });
         }
 
-        if (!data.config?.groqConfigured || !data.config?.geminiConfigured) {
+        // Keys are valid if either backend has .env configured OR user entered them in popup
+        const storageKeys = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
+        const hasGroq = Boolean(data.config?.groqConfigured || userGroqKey || storageKeys.groqApiKey);
+        const hasGemini = Boolean(data.config?.geminiConfigured || userGeminiKey || storageKeys.geminiApiKey);
+
+        if (!hasGroq || !hasGemini) {
           elements.statusDot.className = 'status-dot warning';
           elements.statusText.textContent = 'Keys Missing';
+          elements.missingKeysAlert.classList.remove('hidden');
         } else {
           elements.statusDot.className = 'status-dot online';
           elements.statusText.textContent = 'Online';
+          elements.missingKeysAlert.classList.add('hidden');
         }
         return;
       }
