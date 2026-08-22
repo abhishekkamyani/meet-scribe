@@ -5,6 +5,7 @@
   "description": "Records Google Meet tab audio, transcribes bilingual Urdu/English speech with Groq Whisper, and generates structured AI meeting notes.",
   "permissions": [
     "activeTab",
+    "scripting",
     "tabCapture",
     "offscreen",
     "downloads",

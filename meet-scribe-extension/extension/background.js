@@ -27,6 +27,47 @@ async function ensureOffscreenDocument() {
 }
 
 // Handle messages from Popup or Offscreen Document
+// Extract visible participant names from Google Meet tab DOM
+async function extractGoogleMeetParticipants(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        const names = new Set();
+        
+        // 1. Participant names from tiles, badges, and data attributes
+        document.querySelectorAll('[data-self-name], [data-participant-id], .ZjFb7c, .XE8e1b, div[data-requested-participant-id]').forEach(el => {
+          const raw = el.getAttribute('data-self-name') || el.innerText;
+          if (raw && typeof raw === 'string') {
+            const clean = raw.split('\n')[0].trim();
+            if (clean.length >= 2 && clean.length <= 35 && !['You', 'Presenting', 'Microphone', 'Meeting details', 'Turn on captions'].includes(clean)) {
+              names.add(clean);
+            }
+          }
+        });
+
+        // 2. Video tile name tags
+        document.querySelectorAll('span.notranslate, div.notranslate').forEach(el => {
+          const txt = el.innerText ? el.innerText.trim() : '';
+          if (txt.length >= 2 && txt.length <= 30 && !txt.includes('\n') && !['Chat', 'People', 'Activities', 'Host controls', 'You', 'Meeting details'].includes(txt)) {
+            names.add(txt);
+          }
+        });
+
+        return Array.from(names);
+      }
+    });
+
+    if (results && results[0] && Array.isArray(results[0].result)) {
+      console.log('[Background] Extracted Google Meet participants:', results[0].result);
+      return results[0].result;
+    }
+  } catch (err) {
+    console.warn('[Background] Could not extract participants:', err);
+  }
+  return [];
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
@@ -92,10 +133,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.action.setBadgeText({ text: 'AI...' });
         await chrome.action.setBadgeBackgroundColor({ color: '#3B82F6' });
 
-        // Send STOP message to offscreen document
-        // Offscreen directly performs fetch to backend and initiates downloads!
+        // Extract participant names from active Google Meet tab
+        let participants = [];
+        const [meetTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (meetTab && meetTab.id && meetTab.url && meetTab.url.includes('meet.google.com')) {
+          participants = await extractGoogleMeetParticipants(meetTab.id);
+        }
+
+        // Send STOP message to offscreen document with participant list
         await chrome.runtime.sendMessage({
-          type: 'STOP_OFFSCREEN_RECORDING'
+          type: 'STOP_OFFSCREEN_RECORDING',
+          participants: participants
         });
 
         sendResponse({ success: true });

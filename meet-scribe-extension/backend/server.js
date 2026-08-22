@@ -91,8 +91,9 @@ async function transcribeWithGroq(filePath, clientGroqKey) {
 
 /**
  * Step 2: Format and translate transcript using Google Generative AI (Gemini)
+ * Generates speaker-wise dialogue transcript and ownership-attributed action items.
  */
-async function processWithGemini(rawTranscript, clientGeminiKey) {
+async function processWithGemini(rawTranscript, clientGeminiKey, participants = []) {
   const activeGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
   if (!activeGeminiKey || activeGeminiKey === 'your_gemini_api_key_here') {
     throw new Error('Google Gemini API Key is missing. Please enter your Gemini API Key in the MeetScribe extension settings.');
@@ -113,25 +114,55 @@ async function processWithGemini(rawTranscript, clientGeminiKey) {
   ];
   let lastError = null;
 
-  const systemInstruction = `You are an elite bilingual AI meeting scribe and linguistic expert specializing in Pakistani corporate/workplace conversations (Urdu, English, and mixed 'Urdish').
+  const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
+  const participantsHint = participantsList.length > 0
+    ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nIMPORTANT: Use these exact participant names for speaker turns when their dialogue occurs in the conversation.`
+    : `PARTICIPANT INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara, etc.) from greetings, self-introductions, handovers ("Over to you Shoaib", "Thanks Abhishek"), question-answer exchanges, and conversational context. If any speaker's real name is not mentioned or deducible, use "Speaker 1:", "Speaker 2:", etc. consistently.`;
 
-Your job is to analyze raw speech-to-text transcripts of Google Meet calls and produce a comprehensive, structured output in JSON format adhering strictly to this schema:
+  const systemInstruction = `You are an elite bilingual AI meeting scribe and linguistic expert specializing in corporate and professional Google Meet conversations (Urdu, English, and mixed 'Urdish').
+
+Your mission is to convert raw speech-to-text transcripts into a POLISHED, DIALOGUE-STYLE, SPEAKER-BY-SPEAKER conversation transcript and actionable meeting minutes.
+
+${participantsHint}
+
+CRITICAL RULES FOR TRANSCRIPTS:
+1. DIALOGUE FORMAT (MANDATORY FOR BOTH URDU AND ENGLISH):
+   Every dialogue turn MUST start with the speaker's name followed by a colon.
+   
+   Example Format in Urdu:
+     ابھیشیک: السلام علیکم شعیب، کیا حال ہے؟
+     شعیب: وعلیکم السلام، میں بالکل ٹھیک ہوں۔ پروجیکٹ کا کام کہاں تک پہنچا؟
+     ساحل: ہیلو سب کو، میں نے اے پی آئی انٹیگریشن مکمل کر لی ہے۔
+   
+   Example Format in English:
+     Abhishek: Hey Shoaib, how are you?
+     Shoaib: I am good. How far has the project progressed?
+     Sahil: Hello guys, I have completed the API integration.
+
+2. SPEAKER DIARIZATION & FLOW:
+   - Carefully detect speaker transitions, question-and-answer pairs, greetings, and turn-taking.
+   - Clean up audio stutter or minor STT acoustic errors while preserving 100% of the conversational meaning.
+   - Keep technical terms (e.g., 'API', 'Sprint', 'Deployment', 'Database', 'PR') in accurate context.
+
+3. ACTION ITEMS WITH EXPLICIT OWNERSHIP:
+   - Every single action item MUST explicitly assign ownership to the responsible participant!
+   - Format: "• [Responsible Person]: [Specific action, decision, or deliverable with deadline if mentioned]"
+   - Example in Urdu: "• ساحل: کل شام تک ڈیٹا بیس مائیگریشن اور اے پی آئی ٹیسٹنگ مکمل کرنا۔"
+   - Example in English: "• Sahil: Complete the database migration and API testing by tomorrow evening."
+
+OUTPUT JSON SCHEMA:
 {
-  "transcript_urdu": "Full verbatim transcript written cleanly in Urdu script (نستعلیق / اردو رسم الخط). Fix minor STT phonetic misinterpretations and ensure proper Urdu grammar, punctuation, and flow while preserving all original conversation content.",
-  "transcript_english": "Accurate, end-to-end, natural English translation of the entire meeting conversation.",
-  "action_items_urdu": "Clear, bullet-pointed list of decisions, assigned tasks, and next steps in Urdu (اردو میں لائحہ عمل اور ٹاسکس). Format with bullet points (•).",
-  "action_items_english_improved": "Grammatically polished, professional business English action items with clear ownership, deliverables, and deadlines if mentioned. Format with bullet points (•)."
+  "transcript_urdu": "Full speaker-wise dialogue transcript in Urdu script (e.g. 'ابھیشیک: ...\\nشعیب: ...')",
+  "transcript_english": "Full speaker-wise dialogue translation in English (e.g. 'Abhishek: ...\\nShoaib: ...')",
+  "action_items_urdu": "Bullet-pointed list of tasks with owner names in Urdu (e.g. '• ابھیشیک: ...\\n• شعیب: ...')",
+  "action_items_english_improved": "Polished business English action items with owner names (e.g. '• Abhishek: ...\\n• Shoaib: ...')"
 }
 
-CRITICAL RULES:
-1. You must return ONLY valid, parseable JSON matching the exact schema above.
-2. Do not wrap the JSON in Markdown code fences (\`\`\`json ... \`\`\`). Return pure JSON.
-3. Ensure the Urdu text uses proper Unicode Arabic/Urdu characters.
-4. If the transcript is brief or contains mixed English terms (e.g., 'API', 'Sprint', 'Deployment', 'Client'), keep technical terms in context.`;
+CRITICAL: Return ONLY valid, parseable JSON. Do not wrap in markdown code blocks.`;
 
   for (const modelName of modelCandidates) {
     try {
-      console.log(`[Gemini] Attempting structuring with model: ${modelName}...`);
+      console.log(`[Gemini] Attempting speaker-diarized structuring with model: ${modelName}...`);
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -141,7 +172,7 @@ CRITICAL RULES:
         systemInstruction: systemInstruction
       });
 
-      const prompt = `Here is the raw transcribed meeting speech:\n\n${rawTranscript}\n\nGenerate the complete structured bilingual output in JSON format.`;
+      const prompt = `Here is the raw transcribed meeting audio speech:\n\n${rawTranscript}\n\nGenerate the complete speaker-attributed bilingual dialogue transcript and action items in JSON format.`;
 
       const result = await model.generateContent(prompt);
       const response = await result.response;
@@ -168,7 +199,7 @@ CRITICAL RULES:
         });
       }
 
-      console.log(`[Gemini] Successfully generated structured notes using ${modelName}.`);
+      console.log(`[Gemini] Successfully generated speaker-wise notes using ${modelName}.`);
       return parsedData;
     } catch (err) {
       console.warn(`[Gemini] Error with model ${modelName}:`, err.message);
@@ -190,12 +221,21 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
     });
   }
 
-  // Extract client-supplied API keys from headers or body
+  // Extract client-supplied API keys and participants from headers or body
   const clientGroqKey = req.headers['x-groq-api-key'] || req.body?.groqApiKey;
   const clientGeminiKey = req.headers['x-gemini-api-key'] || req.body?.geminiApiKey;
+  
+  let participants = [];
+  if (req.body?.participants) {
+    try {
+      participants = typeof req.body.participants === 'string' ? JSON.parse(req.body.participants) : req.body.participants;
+    } catch (e) {
+      participants = [];
+    }
+  }
 
   const filePath = uploadedFile.path;
-  console.log(`[MeetScribe] Received audio file: ${uploadedFile.originalname} (${uploadedFile.size} bytes)`);
+  console.log(`[MeetScribe] Received audio file: ${uploadedFile.originalname} (${uploadedFile.size} bytes), participants:`, participants);
 
   try {
     // 1. Check file size
@@ -221,8 +261,8 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
       });
     }
 
-    // 3. Process and Structure via Gemini LLM
-    const structuredOutput = await processWithGemini(rawTranscript, clientGeminiKey);
+    // 3. Process and Structure via Gemini LLM with Speaker Diarization
+    const structuredOutput = await processWithGemini(rawTranscript, clientGeminiKey, participants);
 
     return res.status(200).json({
       success: true,

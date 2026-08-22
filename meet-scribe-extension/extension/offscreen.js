@@ -14,6 +14,7 @@ let activeAudioContext = null;
 let currentBackendUrl = 'http://localhost:3000';
 let userGroqApiKey = '';
 let userGeminiApiKey = '';
+let activeParticipants = [];
 
 // Trigger download into a specific folder in Downloads
 async function downloadFileToFolder(folderName, filename, blob) {
@@ -166,12 +167,15 @@ async function processAndUploadAudio() {
     formData.append('audio', audioBlob, 'meeting-audio.webm');
     if (userGroqApiKey) formData.append('groqApiKey', userGroqApiKey);
     if (userGeminiApiKey) formData.append('geminiApiKey', userGeminiApiKey);
+    if (activeParticipants && activeParticipants.length > 0) {
+      formData.append('participants', JSON.stringify(activeParticipants));
+    }
 
     const headers = {};
     if (userGroqApiKey) headers['X-Groq-API-Key'] = userGroqApiKey;
     if (userGeminiApiKey) headers['X-Gemini-API-Key'] = userGeminiApiKey;
 
-    console.log(`[Offscreen] Sending POST request to: ${currentBackendUrl}/api/process-meeting (with user keys)`);
+    console.log(`[Offscreen] Sending POST request to: ${currentBackendUrl}/api/process-meeting (with participants: ${activeParticipants.join(', ') || 'inferred'})`);
     
     // Direct fetch from offscreen document (bypasses service worker timeout!)
     const response = await fetch(`${currentBackendUrl}/api/process-meeting`, {
@@ -242,6 +246,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true; // Keep response channel open
   } else if (message.type === 'STOP_OFFSCREEN_RECORDING') {
+    activeParticipants = message.participants || [];
     stopRecording()
       .then(() => sendResponse({ success: true }))
       .catch((err) => {
