@@ -90,9 +90,16 @@ async function ensureMicrophonePermission(interactive = false) {
 
 // Initialize Popup
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Load saved settings & API keys
+  // 1. Load saved settings & API keys (Auto-migrates from localhost to live production Vercel)
   const savedData = await chrome.storage.local.get(['backendUrl', 'groqApiKey', 'geminiApiKey']);
-  defaultBackendUrl = savedData.backendUrl || 'https://meet-scribe-five.vercel.app';
+  
+  let activeUrl = savedData.backendUrl;
+  if (!activeUrl || activeUrl.includes('localhost') || activeUrl.includes('127.0.0.1')) {
+    activeUrl = 'https://meet-scribe-five.vercel.app';
+    await chrome.storage.local.set({ backendUrl: activeUrl });
+  }
+
+  defaultBackendUrl = activeUrl;
   userGroqKey = savedData.groqApiKey || '';
   userGeminiKey = savedData.geminiApiKey || '';
 
