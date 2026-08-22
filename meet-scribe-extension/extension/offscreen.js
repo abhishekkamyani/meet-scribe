@@ -12,6 +12,8 @@ let recordedChunks = [];
 let mediaStream = null;
 let activeAudioContext = null;
 let currentBackendUrl = 'http://localhost:3000';
+let userGroqApiKey = '';
+let userGeminiApiKey = '';
 
 // Trigger download of a text file in UTF-8 using DOM Anchor in offscreen document
 async function downloadTextFile(filename, content) {
@@ -75,8 +77,10 @@ async function triggerAllDownloads(data, audioBlob) {
 }
 
 // Start tab recording with audio passthrough
-async function startRecording(streamId, backendUrl) {
+async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
   currentBackendUrl = backendUrl || 'http://localhost:3000';
+  userGroqApiKey = groqKey || '';
+  userGeminiApiKey = geminiKey || '';
   recordedChunks = [];
 
   console.log(`[Offscreen] Starting tab capture with streamId: ${streamId}`);
@@ -159,12 +163,19 @@ async function processAndUploadAudio() {
 
     const formData = new FormData();
     formData.append('audio', audioBlob, 'meeting-audio.webm');
+    if (userGroqApiKey) formData.append('groqApiKey', userGroqApiKey);
+    if (userGeminiApiKey) formData.append('geminiApiKey', userGeminiApiKey);
 
-    console.log(`[Offscreen] Sending POST request to: ${currentBackendUrl}/api/process-meeting`);
+    const headers = {};
+    if (userGroqApiKey) headers['X-Groq-API-Key'] = userGroqApiKey;
+    if (userGeminiApiKey) headers['X-Gemini-API-Key'] = userGeminiApiKey;
+
+    console.log(`[Offscreen] Sending POST request to: ${currentBackendUrl}/api/process-meeting (with user keys)`);
     
     // Direct fetch from offscreen document (bypasses service worker timeout!)
     const response = await fetch(`${currentBackendUrl}/api/process-meeting`, {
       method: 'POST',
+      headers: headers,
       body: formData
     });
 
@@ -220,7 +231,7 @@ async function processAndUploadAudio() {
 // Listen for messages from background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_OFFSCREEN_RECORDING') {
-    startRecording(message.streamId, message.backendUrl)
+    startRecording(message.streamId, message.backendUrl, message.groqApiKey, message.geminiApiKey)
       .then(() => sendResponse({ success: true }))
       .catch((err) => {
         console.error('[Offscreen] Start recording failed:', err);

@@ -61,13 +61,14 @@ app.get('/api/health', (req, res) => {
 /**
  * Step 1: Transcribe audio using Groq Whisper-large-v3 (language: 'ur')
  */
-async function transcribeWithGroq(filePath) {
-  if (!process.env.GROQ_API_KEY || process.env.GROQ_API_KEY === 'your_groq_api_key_here') {
-    throw new Error('GROQ_API_KEY is not configured in backend/.env');
+async function transcribeWithGroq(filePath, clientGroqKey) {
+  const activeGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
+  if (!activeGroqKey || activeGroqKey === 'your_groq_api_key_here') {
+    throw new Error('Groq API Key is missing. Please enter your Groq API Key in the MeetScribe extension settings.');
   }
 
   const groq = new Groq({
-    apiKey: process.env.GROQ_API_KEY
+    apiKey: activeGroqKey
   });
 
   const fileStream = fs.createReadStream(filePath);
@@ -91,12 +92,13 @@ async function transcribeWithGroq(filePath) {
 /**
  * Step 2: Format and translate transcript using Google Generative AI (Gemini)
  */
-async function processWithGemini(rawTranscript) {
-  if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-    throw new Error('GEMINI_API_KEY is not configured in backend/.env');
+async function processWithGemini(rawTranscript, clientGeminiKey) {
+  const activeGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
+  if (!activeGeminiKey || activeGeminiKey === 'your_gemini_api_key_here') {
+    throw new Error('Google Gemini API Key is missing. Please enter your Gemini API Key in the MeetScribe extension settings.');
   }
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+  const genAI = new GoogleGenerativeAI(activeGeminiKey);
   
   // Prioritized list of active models (verified against Google AI API)
   const userConfiguredModel = process.env.GEMINI_MODEL;
@@ -188,6 +190,10 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
     });
   }
 
+  // Extract client-supplied API keys from headers or body
+  const clientGroqKey = req.headers['x-groq-api-key'] || req.body?.groqApiKey;
+  const clientGeminiKey = req.headers['x-gemini-api-key'] || req.body?.geminiApiKey;
+
   const filePath = uploadedFile.path;
   console.log(`[MeetScribe] Received audio file: ${uploadedFile.originalname} (${uploadedFile.size} bytes)`);
 
@@ -198,7 +204,7 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
     }
 
     // 2. Transcribe via Groq Whisper
-    const rawTranscript = await transcribeWithGroq(filePath);
+    const rawTranscript = await transcribeWithGroq(filePath, clientGroqKey);
 
     if (!rawTranscript || rawTranscript.trim().length === 0) {
       return res.status(200).json({
@@ -216,7 +222,7 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
     }
 
     // 3. Process and Structure via Gemini LLM
-    const structuredOutput = await processWithGemini(rawTranscript);
+    const structuredOutput = await processWithGemini(rawTranscript, clientGeminiKey);
 
     return res.status(200).json({
       success: true,

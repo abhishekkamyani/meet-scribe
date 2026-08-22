@@ -181,46 +181,110 @@ body {
 
 /* Settings Bar */
 .settings-drawer {
-  padding: 10px 16px;
-  background: #162035;
+  padding: 12px 16px;
+  background: #141d30;
   border-bottom: 1px solid var(--border-color);
   font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 270px;
+  overflow-y: auto;
 }
 
-.settings-row {
+.settings-header {
   display: flex;
-  gap: 8px;
-  margin-top: 6px;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  color: #fff;
+  font-size: 12px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10.5px;
+  color: #cbd5e1;
+}
+
+.settings-link {
+  color: #34d399;
+  text-decoration: none;
+  font-size: 10px;
+}
+
+.settings-link:hover {
+  text-decoration: underline;
+}
+
+.input-group {
+  display: flex;
+  align-items: center;
+  position: relative;
 }
 
 .input-text {
-  flex: 1;
+  width: 100%;
   background: var(--bg-inner);
   border: 1px solid var(--border-color);
   color: #fff;
-  padding: 6px 10px;
+  padding: 6px 30px 6px 9px;
   border-radius: 6px;
   font-size: 11px;
   outline: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .input-text:focus {
   border-color: var(--primary);
 }
 
+.toggle-visibility-btn {
+  position: absolute;
+  right: 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px;
+}
+
+.toggle-visibility-btn:hover {
+  color: #fff;
+}
+
 .btn-small {
   background: var(--primary);
   color: #fff;
   border: none;
-  padding: 6px 12px;
+  padding: 7px 14px;
   border-radius: 6px;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
   font-size: 11px;
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .btn-small:hover {
   background: var(--primary-hover);
+}
+
+.save-status-msg {
+  font-size: 10.5px;
+  color: #34d399;
+  font-weight: 600;
 }
 
 /* Alert Banner */

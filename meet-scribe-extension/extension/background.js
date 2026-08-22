@@ -59,13 +59,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // 2. Ensure Offscreen document is loaded
         await ensureOffscreenDocument();
 
-        // 3. Send START message to offscreen document
+        // 3. Send START message to offscreen document with user API keys
         const backendUrl = message.backendUrl || 'http://localhost:3000';
+        const storageData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
+        const groqApiKey = message.groqApiKey || storageData.groqApiKey || '';
+        const geminiApiKey = message.geminiApiKey || storageData.geminiApiKey || '';
+
         await chrome.runtime.sendMessage({
           type: 'START_OFFSCREEN_RECORDING',
           streamId: streamId,
           tabTitle: tab.title || 'Google Meet',
-          backendUrl: backendUrl
+          backendUrl: backendUrl,
+          groqApiKey: groqApiKey,
+          geminiApiKey: geminiApiKey
         });
 
         // 4. Update UI State & Badge

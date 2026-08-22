@@ -19,6 +19,12 @@ const elements = {
   toggleSettingsBtn: document.getElementById('toggle-settings-btn'),
   settingsPanel: document.getElementById('settings-panel'),
   backendUrlInput: document.getElementById('backend-url-input'),
+  groqApiKeyInput: document.getElementById('groq-api-key-input'),
+  geminiApiKeyInput: document.getElementById('gemini-api-key-input'),
+  toggleGroqKeyBtn: document.getElementById('toggle-groq-key-btn'),
+  toggleGeminiKeyBtn: document.getElementById('toggle-gemini-key-btn'),
+  settingsSavedIndicator: document.getElementById('settings-saved-indicator'),
+  missingKeysAlert: document.getElementById('missing-keys-alert'),
   saveSettingsBtn: document.getElementById('save-settings-btn'),
   notMeetAlert: document.getElementById('not-meet-alert'),
 
@@ -60,19 +66,29 @@ let timerInterval = null;
 let currentResults = null;
 let activeTabType = 'ur-trans';
 let defaultBackendUrl = 'http://localhost:3000';
+let userGroqKey = '';
+let userGeminiKey = '';
 
 // Initialize Popup
 document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Load saved settings
-  const { backendUrl = 'http://localhost:3000' } = await chrome.storage.local.get('backendUrl');
-  defaultBackendUrl = backendUrl;
-  elements.backendUrlInput.value = backendUrl;
+  // 1. Load saved settings & API keys
+  const savedData = await chrome.storage.local.get(['backendUrl', 'groqApiKey', 'geminiApiKey']);
+  defaultBackendUrl = savedData.backendUrl || 'http://localhost:3000';
+  userGroqKey = savedData.groqApiKey || '';
+  userGeminiKey = savedData.geminiApiKey || '';
+
+  elements.backendUrlInput.value = defaultBackendUrl;
+  if (userGroqKey) elements.groqApiKeyInput.value = userGroqKey;
+  if (userGeminiKey) elements.geminiApiKeyInput.value = userGeminiKey;
+
+  // Show onboarding prompt if keys are missing
+  checkMissingKeys(userGroqKey, userGeminiKey);
 
   // 2. Check active tab
   await checkActiveTab();
 
   // 3. Check backend health
-  checkBackendHealth(backendUrl);
+  checkBackendHealth(defaultBackendUrl);
 
   // 4. Restore state
   await restoreState();
@@ -80,6 +96,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   // 5. Setup event listeners
   setupEventListeners();
 });
+
+// Check if API keys are configured
+function checkMissingKeys(groqKey, geminiKey) {
+  if (!groqKey || !geminiKey) {
+    elements.missingKeysAlert.classList.remove('hidden');
+  } else {
+    elements.missingKeysAlert.classList.add('hidden');
+  }
+}
 
 // Check if current tab is a Google Meet call
 async function checkActiveTab() {
@@ -286,24 +311,89 @@ function setupEventListeners() {
     elements.settingsPanel.classList.toggle('hidden');
   });
 
-  // Save settings
+  // Onboarding Alert Click
+  if (elements.missingKeysAlert) {
+    elements.missingKeysAlert.addEventListener('click', () => {
+      elements.settingsPanel.classList.remove('hidden');
+      elements.groqApiKeyInput.focus();
+    });
+  }
+
+  // Toggle Groq Key Visibility
+  if (elements.toggleGroqKeyBtn) {
+    elements.toggleGroqKeyBtn.addEventListener('click', () => {
+      const isPass = elements.groqApiKeyInput.type === 'password';
+      elements.groqApiKeyInput.type = isPass ? 'text' : 'password';
+      elements.toggleGroqKeyBtn.textContent = isPass ? '🔒' : '👁️';
+    });
+  }
+
+  // Toggle Gemini Key Visibility
+  if (elements.toggleGeminiKeyBtn) {
+    elements.toggleGeminiKeyBtn.addEventListener('click', () => {
+      const isPass = elements.geminiApiKeyInput.type === 'password';
+      elements.geminiApiKeyInput.type = isPass ? 'text' : 'password';
+      elements.toggleGeminiKeyBtn.textContent = isPass ? '🔒' : '👁️';
+    });
+  }
+
+  // Save settings (including API keys)
   elements.saveSettingsBtn.addEventListener('click', async () => {
     const url = elements.backendUrlInput.value.trim() || 'http://localhost:3000';
-    await chrome.storage.local.set({ backendUrl: url });
+    const groqKey = elements.groqApiKeyInput.value.trim();
+    const geminiKey = elements.geminiApiKeyInput.value.trim();
+
+    await chrome.storage.local.set({
+      backendUrl: url,
+      groqApiKey: groqKey,
+      geminiApiKey: geminiKey
+    });
+
     defaultBackendUrl = url;
-    elements.settingsPanel.classList.add('hidden');
+    userGroqKey = groqKey;
+    userGeminiKey = geminiKey;
+
+    checkMissingKeys(groqKey, geminiKey);
+
+    // Show temporary saved indicator
+    if (elements.settingsSavedIndicator) {
+      elements.settingsSavedIndicator.classList.remove('hidden');
+      setTimeout(() => {
+        elements.settingsSavedIndicator.classList.add('hidden');
+      }, 2500);
+    }
+
+    setTimeout(() => {
+      elements.settingsPanel.classList.add('hidden');
+    }, 800);
+
     checkBackendHealth(url);
   });
 
   // Start Recording
   elements.startRecordingBtn.addEventListener('click', async () => {
+    // Check if keys are set
+    const data = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
+    const groqKey = data.groqApiKey || userGroqKey;
+    const geminiKey = data.geminiApiKey || userGeminiKey;
+
+    if (!groqKey || !geminiKey) {
+      elements.settingsPanel.classList.remove('hidden');
+      if (!groqKey) elements.groqApiKeyInput.focus();
+      else elements.geminiApiKeyInput.focus();
+      alert('Please enter your Groq and Gemini API keys in Settings before recording.');
+      return;
+    }
+
     elements.startRecordingBtn.disabled = true;
     showView('recording');
     startTimer(Date.now());
 
     chrome.runtime.sendMessage({
       type: 'START_RECORDING',
-      backendUrl: defaultBackendUrl
+      backendUrl: defaultBackendUrl,
+      groqApiKey: groqKey,
+      geminiApiKey: geminiKey
     }, (response) => {
       elements.startRecordingBtn.disabled = false;
       if (response && !response.success) {
