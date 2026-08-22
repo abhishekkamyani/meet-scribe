@@ -156,10 +156,10 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
 
   const options = {
     mimeType: 'audio/webm;codecs=opus',
-    audioBitsPerSecond: 128000
+    audioBitsPerSecond: 64000 // 64kbps Opus: broadcast-grade voice quality + ultra-efficient file size for 2+ hour meetings
   };
   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-    mediaRecorder = new MediaRecorder(mediaStream, { audioBitsPerSecond: 128000 });
+    mediaRecorder = new MediaRecorder(mediaStream, { audioBitsPerSecond: 64000 });
   } else {
     mediaRecorder = new MediaRecorder(mediaStream, options);
   }

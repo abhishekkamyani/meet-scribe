@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const Groq = require('groq-sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleAIFileManager } = require('@google/generative-ai/server');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,7 +15,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Groq-API-Key', 'X-Gemini-API-Key']
 }));
 app.use(express.json());
 
@@ -24,7 +25,7 @@ if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 
-// Configure Multer storage
+// Configure Multer storage (Supports up to 500MB for 4+ hour long meetings)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, TEMP_DIR);
@@ -38,7 +39,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 100 * 1024 * 1024 // 100MB limit
+    fileSize: 500 * 1024 * 1024 // 500MB limit (easily accommodates 4+ hours of audio)
   }
 });
 
@@ -100,31 +101,55 @@ async function processDirectAudioWithGemini(filePath, clientGeminiKey, participa
   }
 
   const genAI = new GoogleGenerativeAI(activeGeminiKey);
-  const audioBase64 = fs.readFileSync(filePath).toString('base64');
-  const audioPart = {
-    inlineData: {
-      data: audioBase64,
-      mimeType: 'audio/webm'
+  const fileStats = fs.statSync(filePath);
+  const isLargeFile = fileStats.size > 20 * 1024 * 1024; // If > 20MB (approx 30+ mins), use File API
+
+  let fileManager = null;
+  let uploadResult = null;
+  let audioPart = null;
+
+  try {
+    if (isLargeFile) {
+      console.log(`[Gemini Multimodal] Audio file size is ${(fileStats.size / (1024 * 1024)).toFixed(1)}MB (Long meeting). Uploading via GoogleAIFileManager...`);
+      fileManager = new GoogleAIFileManager(activeGeminiKey);
+      uploadResult = await fileManager.uploadFile(filePath, {
+        mimeType: 'audio/webm',
+        displayName: `MeetScribe-Audio-${Date.now()}`
+      });
+      console.log(`[Gemini Multimodal] File successfully uploaded to Google AI File API. URI: ${uploadResult.file.uri}`);
+      audioPart = {
+        fileData: {
+          fileUri: uploadResult.file.uri,
+          mimeType: uploadResult.file.mimeType
+        }
+      };
+    } else {
+      const audioBase64 = fs.readFileSync(filePath).toString('base64');
+      audioPart = {
+        inlineData: {
+          data: audioBase64,
+          mimeType: 'audio/webm'
+        }
+      };
     }
-  };
 
-  const userConfiguredModel = process.env.GEMINI_MODEL;
-  const modelCandidates = [
-    ...(userConfiguredModel ? [userConfiguredModel] : []),
-    'gemini-3.5-flash',
-    'gemini-flash-latest',
-    'gemini-3.6-flash',
-    'gemini-3.7-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-pro-latest'
-  ];
+    const userConfiguredModel = process.env.GEMINI_MODEL;
+    const modelCandidates = [
+      ...(userConfiguredModel ? [userConfiguredModel] : []),
+      'gemini-3.5-flash',
+      'gemini-flash-latest',
+      'gemini-3.6-flash',
+      'gemini-3.7-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-pro-latest'
+    ];
 
-  const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
-  const participantsHint = participantsList.length > 0
-    ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nAttribute speaker tags to these participants whenever they are speaking in the audio.`
-    : `SPEAKER INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara) from greetings, voice introductions, and conversational context. If a speaker is unidentified, use "Speaker 1:", "Speaker 2:" consistently.`;
+    const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
+    const participantsHint = participantsList.length > 0
+      ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nAttribute speaker tags to these participants whenever they are speaking in the audio.`
+      : `SPEAKER INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara) from greetings, voice introductions, and conversational context. If a speaker is unidentified, use "Speaker 1:", "Speaker 2:" consistently.`;
 
-  const systemInstruction = `You are an elite bilingual AI meeting scribe specializing in Urdu, English, and mixed Pakistani/Indian corporate conversations (Urdish).
+    const systemInstruction = `You are an elite bilingual AI meeting scribe specializing in Urdu, English, and mixed Pakistani/Indian corporate conversations (Urdish).
 
 Your mission is to listen directly to the recorded meeting audio and generate an ACCURATE, SPEAKER-DIARIZED bilingual meeting transcript and action items.
 
@@ -163,48 +188,60 @@ OUTPUT JSON SCHEMA:
 
 CRITICAL: Return ONLY valid, parseable JSON. Do not wrap in markdown code blocks.`;
 
-  let lastError = null;
+    let lastError = null;
 
-  for (const modelName of modelCandidates) {
-    try {
-      console.log(`[Gemini Multimodal] Listening directly to audio recording with model: ${modelName}...`);
-      const model = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: 'application/json'
-        },
-        systemInstruction: systemInstruction
-      });
+    for (const modelName of modelCandidates) {
+      try {
+        console.log(`[Gemini Multimodal] Processing audio recording with model: ${modelName}...`);
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json'
+          },
+          systemInstruction: systemInstruction
+        });
 
-      const prompt = `Listen carefully to this meeting audio recording and generate the full speaker-attributed bilingual dialogue transcript and action items in JSON format adhering strictly to the schema.`;
+        const prompt = `Listen carefully to this meeting audio recording and generate the full speaker-attributed bilingual dialogue transcript and action items in JSON format adhering strictly to the schema.`;
 
-      const result = await model.generateContent([prompt, audioPart]);
-      const response = await result.response;
-      const responseText = response.text().trim();
+        const result = await model.generateContent([prompt, audioPart]);
+        const response = await result.response;
+        const responseText = response.text().trim();
 
-      const cleanedJsonStr = responseText
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '')
-        .trim();
+        const cleanedJsonStr = responseText
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
 
-      const parsedData = JSON.parse(cleanedJsonStr);
+        const parsedData = JSON.parse(cleanedJsonStr);
 
-      const requiredKeys = ['transcript_urdu', 'transcript_english', 'action_items_urdu', 'action_items_english_improved'];
-      requiredKeys.forEach(k => {
-        parsedData[k] = parsedData[k] || '';
-      });
+        const requiredKeys = ['transcript_urdu', 'transcript_english', 'action_items_urdu', 'action_items_english_improved'];
+        requiredKeys.forEach(k => {
+          parsedData[k] = parsedData[k] || '';
+        });
 
-      console.log(`[Gemini Multimodal] Successfully generated notes directly from audio using ${modelName}.`);
-      return parsedData;
-    } catch (err) {
-      console.warn(`[Gemini Multimodal] Direct audio attempt with ${modelName} encountered error:`, err.message);
-      lastError = err;
+        console.log(`[Gemini Multimodal] Successfully generated notes directly from audio using ${modelName}.`);
+        return parsedData;
+      } catch (err) {
+        console.warn(`[Gemini Multimodal] Direct audio attempt with ${modelName} encountered error:`, err.message);
+        lastError = err;
+      }
+    }
+
+    throw new Error(`Direct audio processing failed: ${lastError ? lastError.message : 'Unknown error'}`);
+
+  } finally {
+    // Delete remote file from Google AI storage if uploaded
+    if (fileManager && uploadResult && uploadResult.file) {
+      try {
+        await fileManager.deleteFile(uploadResult.file.name);
+        console.log('[Gemini Multimodal] Cleaned up remote audio file from Google AI storage.');
+      } catch (delErr) {
+        console.warn('[Gemini Multimodal] Could not delete remote file:', delErr.message);
+      }
     }
   }
-
-  throw new Error(`Direct audio processing failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
 /**
@@ -376,6 +413,10 @@ function startServer(portToTry, attemptsLeft = 10) {
     console.log(`  Process API:  http://localhost:${portToTry}/api/process-meeting`);
     console.log(`===================================================`);
   });
+
+  // Set 10-minute timeouts to support multi-hour meeting audio uploads and AI generation
+  srv.timeout = 600000;
+  srv.keepAliveTimeout = 600000;
 
   srv.on('error', (err) => {
     if (err.code === 'EADDRINUSE' && attemptsLeft > 0) {
