@@ -90,18 +90,24 @@ async function transcribeWithGroq(filePath, clientGroqKey) {
 }
 
 /**
- * Step 2: Format and translate transcript using Google Generative AI (Gemini)
- * Generates speaker-wise dialogue transcript and ownership-attributed action items.
+ * Primary Engine: Direct Multimodal Audio Processing with Google Gemini
+ * Ingests the raw audio file directly to capture exact voice tones, authentic Urdu speech, and technical terms.
  */
-async function processWithGemini(rawTranscript, clientGeminiKey, participants = []) {
+async function processDirectAudioWithGemini(filePath, clientGeminiKey, participants = []) {
   const activeGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
   if (!activeGeminiKey || activeGeminiKey === 'your_gemini_api_key_here') {
-    throw new Error('Google Gemini API Key is missing. Please enter your Gemini API Key in the MeetScribe extension settings.');
+    throw new Error('Google Gemini API Key is missing. Please enter your Gemini API Key in settings.');
   }
 
   const genAI = new GoogleGenerativeAI(activeGeminiKey);
-  
-  // Prioritized list of active models (verified against Google AI API)
+  const audioBase64 = fs.readFileSync(filePath).toString('base64');
+  const audioPart = {
+    inlineData: {
+      data: audioBase64,
+      mimeType: 'audio/webm'
+    }
+  };
+
   const userConfiguredModel = process.env.GEMINI_MODEL;
   const modelCandidates = [
     ...(userConfiguredModel ? [userConfiguredModel] : []),
@@ -112,35 +118,40 @@ async function processWithGemini(rawTranscript, clientGeminiKey, participants = 
     'gemini-2.5-flash-lite',
     'gemini-pro-latest'
   ];
-  let lastError = null;
 
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const participantsHint = participantsList.length > 0
-    ? `KNOWN MEETING ATTENDEES (from Google Meet tab):\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nIMPORTANT: Use these exact attendee names for dialogue speaker tags whenever they are speaking.`
-    : `SPEAKER INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara) from conversational cues, name calls, greetings, and introductions. If any speaker is not identifiable, use "Speaker 1:", "Speaker 2:" consistently.`;
+    ? `KNOWN MEETING PARTICIPANTS:\n${participantsList.map(p => `- ${p}`).join('\n')}\n\nAttribute speaker tags to these participants whenever they are speaking in the audio.`
+    : `SPEAKER INFERENCE:\nInfer actual speaker names (e.g., Abhishek, Shoaib, Sahil, Ali, Sara) from greetings, voice introductions, and conversational context. If a speaker is unidentified, use "Speaker 1:", "Speaker 2:" consistently.`;
 
-  const systemInstruction = `You are an elite bilingual linguistic expert and AI meeting transcriber specializing in Pakistani & international workplace conversations (Urdu, English, and mixed 'Urdish').
+  const systemInstruction = `You are an elite bilingual AI meeting scribe specializing in Urdu, English, and mixed Pakistani/Indian corporate conversations (Urdish).
 
-Your task is to take the raw speech-to-text transcript from Groq Whisper and produce an ACCURATE, HIGH-FIDELITY, SPEAKER-DIARIZED bilingual record.
+Your mission is to listen directly to the recorded meeting audio and generate an ACCURATE, SPEAKER-DIARIZED bilingual meeting transcript and action items.
 
 ${participantsHint}
 
-CORE RESPONSIBILITIES:
-1. FAITHFUL TRANSCRIPTION (DO NOT INVENT CONTENT):
-   - Every sentence must accurately reflect what was ACTUALLY spoken in the audio.
-   - Fix minor Speech-to-Text acoustic misinterpretations (e.g., technical terms, names, slang, mixed Urdish phrases) so sentences read grammatically and naturally in both languages.
-   - Do NOT invent fictional agendas, fake discussions, or generic corporate filler.
+CRITICAL RULES:
+1. STRICT URDU LANGUAGE (ABSOLUTELY NO ARABIC):
+   - The spoken language is URDU / HINDI / URDISH (اردو زبان) and English.
+   - NEVER output Arabic greetings or phrases like "مرحبا" or "بارک اللہ" or "أهلا وسهلا".
+   - Use authentic conversational Urdu (مثلاً: "ہیلو", "السلام علیکم", "کیا حال ہے", "کیسے ہیں", "ٹھیک ہوں", "اپ ڈیٹ", "بٹن", "یو آئی", "پیج", "اینڈ پوائنٹ", "کام").
 
-2. DUAL-LANGUAGE OUTPUTS:
-   - "transcript_urdu": Complete, natural verbatim conversation rendered cleanly in Urdu script (اردو رسم الخط / نستعلیق). Format every line as "Speaker Name: [Urdu dialogue]".
-   - "transcript_english": Complete, accurate, natural English translation of the entire conversation turn-by-turn. Format every line as "Speaker Name: [English dialogue]".
+2. STRICT FIDELITY TO ACTUAL AUDIO:
+   - Transcribe and translate ONLY what was ACTUALLY spoken in the audio recording.
+   - Do NOT invent fictional agendas, fake meeting topics, or generic filler.
+   - Keep technical English terms (e.g., UI, Button, API, Page, Endpoint, Deployment, Bug, Fix) intact and properly spelled.
 
-3. CONCRETE ACTION ITEMS:
-   - Extract only real commitments, decisions, tasks, or follow-ups mentioned in the speech.
-   - Format: "• [Responsible Person]: [Concrete action item or deliverable]"
-   - If no tasks were assigned, write:
-     Urdu: "• میٹنگ میں کوئی مخصوص ٹاسک یا ایکشن آئٹم تفویض نہیں کیا گیا۔"
-     English: "• No specific action items were assigned in this discussion."
+3. DIALOGUE FORMAT (MANDATORY FOR BOTH URDU AND ENGLISH):
+   Every dialogue line MUST start with the speaker's name:
+   Urdu: "ابھیشیک: [اردو میں اصل گفتگو]"
+   English: "Abhishek: [Accurate English translation]"
+
+4. CONCRETE ACTION ITEMS:
+   - Extract only real commitments, bug fixes, tasks, or follow-ups mentioned in the speech.
+   - Format: "• [Responsible Person]: [Specific action item or task]"
+   - If no tasks were discussed, write:
+     Urdu: "• اس گفتگو میں کوئی مخصوص ٹاسک یا ایکشن آئٹم زیرِ بحث نہیں آیا۔"
+     English: "• No specific action items were discussed in this conversation."
 
 OUTPUT JSON SCHEMA:
 {
@@ -150,27 +161,28 @@ OUTPUT JSON SCHEMA:
   "action_items_english_improved": "Polished business English action items with assigned person names (e.g. '• Abhishek: ...\\n• Shoaib: ...')"
 }
 
-CRITICAL: Output ONLY valid, parseable JSON matching the schema above.`;
+CRITICAL: Return ONLY valid, parseable JSON. Do not wrap in markdown code blocks.`;
+
+  let lastError = null;
 
   for (const modelName of modelCandidates) {
     try {
-      console.log(`[Gemini] Attempting speaker-diarized structuring with model: ${modelName}...`);
+      console.log(`[Gemini Multimodal] Listening directly to audio recording with model: ${modelName}...`);
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
-          temperature: 0.2,
+          temperature: 0.1,
           responseMimeType: 'application/json'
         },
         systemInstruction: systemInstruction
       });
 
-      const prompt = `Here is the raw transcribed meeting audio speech:\n\n${rawTranscript}\n\nGenerate the complete speaker-attributed bilingual dialogue transcript and action items in JSON format.`;
+      const prompt = `Listen carefully to this meeting audio recording and generate the full speaker-attributed bilingual dialogue transcript and action items in JSON format adhering strictly to the schema.`;
 
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent([prompt, audioPart]);
       const response = await result.response;
       const responseText = response.text().trim();
 
-      // Clean possible markdown wrappers if present
       const cleanedJsonStr = responseText
         .replace(/^```json\s*/i, '')
         .replace(/^```\s*/i, '')
@@ -179,30 +191,114 @@ CRITICAL: Output ONLY valid, parseable JSON matching the schema above.`;
 
       const parsedData = JSON.parse(cleanedJsonStr);
 
-      // Validate required keys
       const requiredKeys = ['transcript_urdu', 'transcript_english', 'action_items_urdu', 'action_items_english_improved'];
-      const missingKeys = requiredKeys.filter(k => !(k in parsedData));
-      
-      if (missingKeys.length > 0) {
-        console.warn(`[Gemini] Model ${modelName} returned JSON missing keys:`, missingKeys);
-        // Fill missing keys with defaults
-        missingKeys.forEach(k => {
-          parsedData[k] = parsedData[k] || '';
-        });
-      }
+      requiredKeys.forEach(k => {
+        parsedData[k] = parsedData[k] || '';
+      });
 
-      console.log(`[Gemini] Successfully generated speaker-wise notes using ${modelName}.`);
+      console.log(`[Gemini Multimodal] Successfully generated notes directly from audio using ${modelName}.`);
       return parsedData;
     } catch (err) {
-      console.warn(`[Gemini] Error with model ${modelName}:`, err.message);
+      console.warn(`[Gemini Multimodal] Direct audio attempt with ${modelName} encountered error:`, err.message);
       lastError = err;
     }
   }
 
-  throw new Error(`Failed to generate notes with Gemini: ${lastError ? lastError.message : 'Unknown error'}`);
+  throw new Error(`Direct audio processing failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
-// Main meeting processing endpoint
+/**
+ * Secondary / Fallback Engine: Groq Whisper STT + Gemini Post-Processor
+ */
+async function processWithGroqAndGemini(filePath, clientGroqKey, clientGeminiKey, participants = []) {
+  // 1. Transcribe with Groq Whisper
+  const rawTranscript = await transcribeWithGroq(filePath, clientGroqKey);
+
+  if (!rawTranscript || rawTranscript.trim().length === 0) {
+    return {
+      transcript_urdu: "میٹنگ میں کوئی قابلِ فہم آواز یا گفتگو نہیں سنی گئی۔",
+      transcript_english: "No intelligible speech was detected during the meeting recording.",
+      action_items_urdu: "• کوئی ٹاسک یا ایکشن آئٹم ریکارڈ نہیں ہوا۔",
+      action_items_english_improved: "• No action items were identified."
+    };
+  }
+
+  // 2. Structure with Gemini
+  const activeGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
+  if (!activeGeminiKey || activeGeminiKey === 'your_gemini_api_key_here') {
+    throw new Error('Google Gemini API Key is missing. Please enter your Gemini API Key in settings.');
+  }
+
+  const genAI = new GoogleGenerativeAI(activeGeminiKey);
+  const userConfiguredModel = process.env.GEMINI_MODEL;
+  const modelCandidates = [
+    ...(userConfiguredModel ? [userConfiguredModel] : []),
+    'gemini-3.5-flash',
+    'gemini-flash-latest',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-pro-latest'
+  ];
+
+  const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
+  const participantsHint = participantsList.length > 0
+    ? `KNOWN ATTENDEES:\n${participantsList.map(p => `- ${p}`).join('\n')}`
+    : `SPEAKER INFERENCE: Infer actual speaker names from greetings and turn-taking.`;
+
+  const systemInstruction = `You are a bilingual Urdu/English meeting notes editor.
+Convert the raw speech-to-text transcript into clean speaker-by-speaker dialogue and action items.
+
+${participantsHint}
+
+CRITICAL RULES:
+- The spoken language is URDU (اردو) and English. NEVER output Arabic greetings like "مرحبا" or "بارک اللہ".
+- Faithful transcription: Transcribe and translate the exact words from the speech text. Fix minor phonetic errors (e.g. "یو آئی اپ ڈیٹ کرنا ہے", "بٹن سیٹ کرنا ہے").
+- Format dialogue as "Speaker Name: [Content]".
+- Extract only real action items discussed.
+
+OUTPUT JSON SCHEMA:
+{
+  "transcript_urdu": "Full speaker dialogue in Urdu script.",
+  "transcript_english": "Full speaker dialogue in English translation.",
+  "action_items_urdu": "Bullet-pointed tasks with assigned person in Urdu.",
+  "action_items_english_improved": "Polished business English action items with assigned person."
+}`;
+
+  let lastError = null;
+  for (const modelName of modelCandidates) {
+    try {
+      console.log(`[Gemini STT-PostProcessor] Structuring raw text with model: ${modelName}...`);
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json'
+        },
+        systemInstruction: systemInstruction
+      });
+
+      const prompt = `Here is the raw transcribed meeting speech:\n\n${rawTranscript}\n\nFormat into speaker dialogue and action items in JSON.`;
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const cleanedJsonStr = response.text().trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+
+      const parsedData = JSON.parse(cleanedJsonStr);
+      return parsedData;
+    } catch (err) {
+      console.warn(`[Gemini STT-PostProcessor] Error with ${modelName}:`, err.message);
+      lastError = err;
+    }
+  }
+
+  throw new Error(`Structuring failed: ${lastError ? lastError.message : 'Unknown error'}`);
+}
+
+// Main meeting processing endpoint (Dual-Engine: Direct Multimodal Audio with Groq Fallback)
 app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
   const uploadedFile = req.file;
 
@@ -227,63 +323,46 @@ app.post('/api/process-meeting', upload.single('audio'), async (req, res) => {
   }
 
   const filePath = uploadedFile.path;
-  console.log(`[MeetScribe] Received audio file: ${uploadedFile.originalname} (${uploadedFile.size} bytes), participants:`, participants);
+  console.log(`[MeetScribe] Received audio file: ${uploadedFile.originalname} (${uploadedFile.size} bytes), attendees:`, participants);
 
   try {
-    // 1. Check file size
     if (uploadedFile.size === 0) {
       throw new Error('Recorded audio file is empty (0 bytes). Please ensure audio was captured during the meeting.');
     }
 
-    // 2. Transcribe via Groq Whisper
-    const rawTranscript = await transcribeWithGroq(filePath, clientGroqKey);
+    let structuredOutput = null;
 
-    if (!rawTranscript || rawTranscript.trim().length === 0) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          transcript_urdu: "میٹنگ میں کوئی قابلِ فہم آواز یا گفتگو نہیں سنی گئی۔",
-          transcript_english: "No intelligible speech was detected during the meeting recording.",
-          action_items_urdu: "• کوئی ٹاسک یا ایکشن آئٹم ریکارڈ نہیں ہوا۔",
-          action_items_english_improved: "• No action items were identified."
-        },
-        meta: {
-          rawTranscript: ""
-        }
-      });
+    // 1. Try Direct Multimodal Audio with Gemini (Highest fidelity - listens directly to raw audio)
+    try {
+      console.log('[MeetScribe] Attempting Direct Multimodal Audio processing with Gemini...');
+      structuredOutput = await processDirectAudioWithGemini(filePath, clientGeminiKey, participants);
+    } catch (directAudioErr) {
+      console.warn('[MeetScribe] Direct audio processing failed, falling back to Groq Whisper + Gemini pipeline:', directAudioErr.message);
+      
+      // 2. Fallback: Groq Whisper STT + Gemini Structuring
+      structuredOutput = await processWithGroqAndGemini(filePath, clientGroqKey, clientGeminiKey, participants);
     }
-
-    // 3. Process and Structure via Gemini LLM with Speaker Diarization
-    const structuredOutput = await processWithGemini(rawTranscript, clientGeminiKey, participants);
 
     return res.status(200).json({
       success: true,
-      data: {
-        transcript_urdu: structuredOutput.transcript_urdu || rawTranscript,
-        transcript_english: structuredOutput.transcript_english || "",
-        action_items_urdu: structuredOutput.action_items_urdu || "",
-        action_items_english_improved: structuredOutput.action_items_english_improved || ""
-      },
-      meta: {
-        rawTranscript: rawTranscript
-      }
+      data: structuredOutput
     });
 
   } catch (err) {
-    console.error('[MeetScribe] Processing error:', err);
+    console.error('[MeetScribe] Pipeline Error:', err);
     return res.status(500).json({
       success: false,
-      error: err.message || 'Internal error occurred while processing meeting audio.'
+      error: err.message || 'An unexpected error occurred while processing meeting notes.'
     });
   } finally {
-    // Cleanup temporary audio file immediately
-    try {
-      if (fs.existsSync(filePath)) {
+    // Delete temporary audio file from disk
+    if (fs.existsSync(filePath)) {
+      try {
         fs.unlinkSync(filePath);
         console.log(`[MeetScribe] Cleaned up temporary file: ${filePath}`);
+      } catch (cleanupErr) {
+        console.error('[MeetScribe] Error deleting temporary file:', cleanupErr.message);
       }
-    } catch (cleanupErr) {
-      console.error('[MeetScribe] Error deleting temporary file:', cleanupErr.message);
     }
   }
 });
