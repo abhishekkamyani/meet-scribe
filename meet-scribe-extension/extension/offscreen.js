@@ -78,33 +78,78 @@ async function triggerAllDownloads(data, audioBlob) {
   }
 }
 
-// Start tab recording with audio passthrough
+let rawStreams = [];
+
+// Start tab recording with dual-channel (Tab Audio + User Microphone) mixing and audio passthrough
 async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
   currentBackendUrl = backendUrl || 'http://localhost:3000';
   userGroqApiKey = groqKey || '';
   userGeminiApiKey = geminiKey || '';
   recordedChunks = [];
+  rawStreams = [];
 
-  console.log(`[Offscreen] Starting tab capture with streamId: ${streamId}`);
+  console.log(`[Offscreen] Starting mixed audio capture (Tab + Mic) with streamId: ${streamId}`);
 
-  // 1. Capture tab media stream
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      mandatory: {
-        chromeMediaSource: 'tab',
-        chromeMediaSourceId: streamId
-      }
-    },
-    video: false
-  });
+  // 1. Capture Google Meet Tab Audio (Remote participants)
+  let tabStream = null;
+  try {
+    tabStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: 'tab',
+          chromeMediaSourceId: streamId
+        }
+      },
+      video: false
+    });
+    rawStreams.push(tabStream);
+    console.log('[Offscreen] Google Meet tab audio stream acquired.');
+  } catch (tabErr) {
+    console.error('[Offscreen] Failed to acquire tab audio stream:', tabErr);
+    throw new Error(`Failed to capture tab audio: ${tabErr.message}`);
+  }
 
-  // 2. Audio Passthrough (Fix for the Muted Tab Trap!)
-  // Route the captured stream to local speakers so user can still hear the meeting
-  activeAudioContext = new AudioContext();
-  const source = activeAudioContext.createMediaStreamSource(mediaStream);
-  source.connect(activeAudioContext.destination);
+  // 2. Capture User's Microphone (Current user speaking)
+  let micStream = null;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      },
+      video: false
+    });
+    rawStreams.push(micStream);
+    console.log('[Offscreen] User microphone stream acquired.');
+  } catch (micErr) {
+    console.warn('[Offscreen] Microphone not accessible, proceeding with tab audio only:', micErr);
+  }
 
-  // 3. Initialize MediaRecorder with Opus codec in WebM container
+  // 3. Setup AudioContext Mixer
+  activeAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+  if (activeAudioContext.state === 'suspended') {
+    await activeAudioContext.resume();
+  }
+
+  const mixerDestination = activeAudioContext.createMediaStreamDestination();
+
+  // Connect Tab Audio to Mixer (for recording) AND to Speakers (so user hears other attendees)
+  if (tabStream && tabStream.getAudioTracks().length > 0) {
+    const tabSource = activeAudioContext.createMediaStreamSource(tabStream);
+    tabSource.connect(mixerDestination);
+    tabSource.connect(activeAudioContext.destination);
+  }
+
+  // Connect Mic Audio to Mixer ONLY (do NOT connect to speakers to avoid echo)
+  if (micStream && micStream.getAudioTracks().length > 0) {
+    const micSource = activeAudioContext.createMediaStreamSource(micStream);
+    micSource.connect(mixerDestination);
+  }
+
+  // 4. Initialize MediaRecorder on the combined mixed stream
+  mediaStream = mixerDestination.stream;
+
   const options = { mimeType: 'audio/webm;codecs=opus' };
   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
     mediaRecorder = new MediaRecorder(mediaStream);
@@ -125,7 +170,7 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
 
   // Start recording with 1-second timeslices
   mediaRecorder.start(1000);
-  console.log('[Offscreen] MediaRecorder started successfully.');
+  console.log('[Offscreen] Dual-channel recording (Tab Audio + User Mic) active.');
 }
 
 // Stop recording and close streams
@@ -135,7 +180,16 @@ async function stopRecording() {
     mediaRecorder.stop();
   }
 
-  // Stop all audio tracks
+  // Stop all raw audio tracks (tab and mic)
+  if (rawStreams && rawStreams.length > 0) {
+    rawStreams.forEach(stream => {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+    });
+    rawStreams = [];
+  }
+
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
   }
