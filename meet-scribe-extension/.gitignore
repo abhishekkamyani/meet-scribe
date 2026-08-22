@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Sensitive environment variables
+.env
+.env.*
+!.env.example
+
+# Temporary recordings
+backend/temp_recordings/
+temp_recordings/
+*.webm
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS & Editor files
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment variables & secrets (CRITICAL)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Temporary audio files and recordings
+meet-scribe-extension/backend/temp_recordings/
+temp_recordings/
+*.webm
+*.wav
+*.mp3
+*.ogg
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build & Archives
+dist/
+build/
+*.zip
+*.tar.gz
+*.crx

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MeetScribe Urdu</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <!-- Top App Header -->
+  <header class="app-header">
+    <div class="brand-wrapper">
+      <div class="brand-icon">🎙️</div>
+      <div>
+        <div class="brand-title">
+          <span>MeetScribe</span>
+          <span class="badge-tag">Urdu AI</span>
+        </div>
+        <div class="brand-urdu">میٹ اسکرائب اردو</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div id="backend-status-badge" class="status-badge">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text">Checking...</span>
+      </div>
+      <button id="toggle-settings-btn" class="icon-btn" title="Backend Settings">⚙️</button>
+    </div>
+  </header>
+
+  <!-- Settings Drawer (Hidden by default) -->
+  <div id="settings-panel" class="settings-drawer hidden">
+    <div style="font-weight: 600; color: #cbd5e1;">Backend Server URL</div>
+    <div class="settings-row">
+      <input type="text" id="backend-url-input" class="input-text" value="http://localhost:3000" placeholder="http://localhost:3000">
+      <button id="save-settings-btn" class="btn-small">Save</button>
+    </div>
+  </div>
+
+  <!-- Alert Banner: Not on Google Meet -->
+  <div id="not-meet-alert" class="alert-banner hidden">
+    <span class="alert-icon">⚠️</span>
+    <div>
+      <div style="font-weight: 700;">Not on Google Meet</div>
+      <div style="color: #fde68a; margin-top: 2px;">Please switch to an active Google Meet tab (<code>meet.google.com</code>) to record audio.</div>
+    </div>
+  </div>
+
+  <!-- Main Views Container -->
+  <main class="main-content">
+
+    <!-- 1. IDLE VIEW -->
+    <div id="view-idle" class="view-panel">
+      <!-- Active Meeting Info -->
+      <div class="info-card">
+        <div class="info-card-left">
+          <div class="card-icon">📹</div>
+          <div class="card-text-wrapper">
+            <div class="card-label">Active Meeting</div>
+            <div id="active-tab-title" class="card-value">Detecting Meet tab...</div>
+          </div>
+        </div>
+        <span id="meet-detected-badge" class="pill-badge">Meet Ready</span>
+      </div>
+
+      <!-- Feature Grid -->
+      <div class="feature-grid">
+        <div class="feature-box">
+          <div class="feature-title">⚡ Groq Whisper v3</div>
+          <div class="feature-subtitle">Urdu & English Speech-to-Text</div>
+        </div>
+        <div class="feature-box">
+          <div class="feature-title">🤖 Gemini Bilingual AI</div>
+          <div class="feature-subtitle">Structured Notes & Actions</div>
+        </div>
+      </div>
+
+      <!-- Start Button -->
+      <button id="start-recording-btn" class="btn-primary">
+        <span>🎙️</span>
+        <span>Start Meeting Recording</span>
+      </button>
+
+      <div class="font-urdu" style="font-size: 11px; text-align: center; color: var(--text-subtle);">
+        میٹنگ آڈیو ریکارڈ کرنے کے لیے بٹن دبائیں۔
+      </div>
+    </div>
+
+    <!-- 2. RECORDING VIEW -->
+    <div id="view-recording" class="view-panel hidden" style="text-align: center;">
+      <div class="recording-indicator">
+        <span class="pulse-dot"></span>
+        <span>RECORDING MEETING AUDIO</span>
+      </div>
+
+      <!-- Animated Waveform -->
+      <div class="waveform-container">
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+      </div>
+
+      <!-- Live Elapsed Timer -->
+      <div>
+        <div id="recording-timer" class="timer-display">00:00</div>
+        <div class="timer-subtext">Audio passthrough active (meeting audio is audible)</div>
+      </div>
+
+      <!-- Stop Button -->
+      <button id="stop-recording-btn" class="btn-danger">
+        <span>⏹</span>
+        <span>Stop & Process Notes</span>
+      </button>
+    </div>
+
+    <!-- 3. PROCESSING VIEW -->
+    <div id="view-processing" class="view-panel hidden" style="text-align: center; padding-top: 10px;">
+      <div class="spinner-wrapper">
+        <div class="spinner-ring"></div>
+        <div class="spinner-icon">🤖</div>
+      </div>
+
+      <div>
+        <div style="font-size: 15px; font-weight: 700; color: #fff;">Processing Meeting Audio</div>
+        <div id="processing-step-label" style="font-size: 11.5px; color: #34d399; margin-top: 3px;">
+          Uploading audio to backend...
+        </div>
+      </div>
+
+      <!-- Pipeline Steps -->
+      <div class="steps-box">
+        <div class="step-item done">
+          <span>✓</span> <span>Captured tab audio (.webm Opus)</span>
+        </div>
+        <div class="step-item active">
+          <span>▶</span> <span>Groq Whisper-large-v3 Speech-to-Text (Urdu)</span>
+        </div>
+        <div class="step-item">
+          <span>○</span> <span>Gemini Bilingual Structuring & Action Items</span>
+        </div>
+        <div class="step-item">
+          <span>○</span> <span>Saving Audio (.webm) & 4 UTF-8 Text Files</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. COMPLETE VIEW -->
+    <div id="view-complete" class="view-panel hidden">
+      <!-- Success Banner -->
+      <div class="success-banner">
+        <div>
+          <div class="success-title">🎉 Meeting Processed & Saved!</div>
+          <div class="success-desc">Audio (.webm) + 4 UTF-8 files saved to Downloads</div>
+        </div>
+        <button id="download-all-btn" class="btn-small" style="padding: 4px 8px; font-size: 10.5px;">
+          Re-download
+        </button>
+      </div>
+
+      <!-- Tabs Navigation -->
+      <div class="tabs-nav">
+        <button id="tab-btn-ur-trans" class="tab-btn active">Urdu Trans</button>
+        <button id="tab-btn-en-trans" class="tab-btn">Eng Trans</button>
+        <button id="tab-btn-ur-act" class="tab-btn">Urdu Actions</button>
+        <button id="tab-btn-en-act" class="tab-btn">Eng Actions</button>
+      </div>
+
+      <!-- Preview Content Area -->
+      <div class="preview-box">
+        <button id="copy-tab-content-btn" class="copy-btn" title="Copy to Clipboard">
+          <span>📋</span> <span id="copy-btn-text">Copy</span>
+        </button>
+
+        <!-- Tab 1: Urdu Transcript -->
+        <div id="tab-content-ur-trans" class="preview-urdu" style="white-space: pre-line;">
+          لوڈ ہو رہا ہے...
+        </div>
+
+        <!-- Tab 2: English Transcript -->
+        <div id="tab-content-en-trans" class="hidden" style="white-space: pre-line; line-height: 1.6;">
+          Loading...
+        </div>
+
+        <!-- Tab 3: Urdu Action Items -->
+        <div id="tab-content-ur-act" class="preview-urdu hidden" style="white-space: pre-line; color: #a7f3d0;">
+          لوڈ ہو رہا ہے...
+        </div>
+
+        <!-- Tab 4: English Action Items -->
+        <div id="tab-content-en-act" class="hidden" style="white-space: pre-line; color: #a7f3d0; line-height: 1.6;">
+          Loading...
+        </div>
+      </div>
+
+      <!-- Action Button -->
+      <button id="new-recording-btn" class="btn-secondary">
+        <span>🔄</span> <span>Record Another Meeting</span>
+      </button>
+    </div>
+
+    <!-- 5. ERROR VIEW -->
+    <div id="view-error" class="view-panel hidden" style="text-align: center; padding-top: 10px;">
+      <div class="error-icon-box">✕</div>
+      <div>
+        <div class="error-title">Processing Failed</div>
+        <div id="error-message-text" class="error-details" style="margin-top: 8px;">
+          An error occurred.
+        </div>
+      </div>
+      <button id="error-retry-btn" class="btn-danger" style="margin-top: 6px;">
+        Dismiss & Try Again
+      </button>
+    </div>
+
+  </main>
+
+  <!-- Bottom Footer -->
+  <footer class="app-footer">
+    <span>MeetScribe Urdu v1.0</span>
+    <span>Groq Whisper + Gemini AI</span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
