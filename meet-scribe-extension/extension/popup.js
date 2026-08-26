@@ -1,7 +1,13 @@
 /**
- * MeetScribe Urdu - Popup Controller
- * Manages UI state transitions, live timer, Google Meet validation, and output previews.
+ * MeetScribe Urdu - Popup Controller (100% Dynamic)
+ * Auto-discovers backend endpoints, auto-detects participant names, and manages UI states.
  */
+
+const CANDIDATE_BACKEND_URLS = [
+  'http://localhost:3001',
+  'http://localhost:3000',
+  'https://meet-scribe-five.vercel.app'
+];
 
 // DOM Elements
 const elements = {
@@ -30,6 +36,8 @@ const elements = {
 
   // Idle View
   activeTabTitle: document.getElementById('active-tab-title'),
+  detectedParticipantsRow: document.getElementById('detected-participants-row'),
+  detectedParticipantsText: document.getElementById('detected-participants-text'),
   meetDetectedBadge: document.getElementById('meet-detected-badge'),
   startRecordingBtn: document.getElementById('start-recording-btn'),
 
@@ -62,13 +70,12 @@ const elements = {
   errorRetryBtn: document.getElementById('error-retry-btn')
 };
 
-const OFFICIAL_BACKEND_URL = 'https://meet-scribe-five.vercel.app';
 let timerInterval = null;
 let currentResults = null;
 let activeTabType = 'ur-trans';
-let defaultBackendUrl = OFFICIAL_BACKEND_URL;
 let userGroqKey = '';
 let userGeminiKey = '';
+let activeBackendUrl = 'http://localhost:3001';
 
 // Request / Verify Microphone Permission
 async function ensureMicrophonePermission(interactive = false) {
@@ -81,54 +88,81 @@ async function ensureMicrophonePermission(interactive = false) {
     console.warn('Microphone permission check:', err.name, err.message);
     if (elements.micPermissionAlert) elements.micPermissionAlert.classList.remove('hidden');
     if (interactive) {
-      // Open dedicated full-tab permission page (prevents popup cut-off/closing!)
       chrome.tabs.create({ url: chrome.runtime.getURL('permission.html') });
     }
     return false;
   }
 }
 
-// Initialize Popup
-document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Load saved API keys (Backend URL is managed / locked to production)
-  const savedData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
-  
-  defaultBackendUrl = OFFICIAL_BACKEND_URL;
-  userGroqKey = savedData.groqApiKey || '';
-  userGeminiKey = savedData.geminiApiKey || '';
+// Dynamically discover and test backend endpoints
+async function autoDiscoverBackend() {
+  const saved = await chrome.storage.local.get('backendUrl');
+  const candidates = Array.from(new Set([
+    saved.backendUrl,
+    ...CANDIDATE_BACKEND_URLS
+  ])).filter(Boolean);
 
-  if (userGroqKey) elements.groqApiKeyInput.value = userGroqKey;
-  if (userGeminiKey) elements.geminiApiKeyInput.value = userGeminiKey;
+  for (const url of candidates) {
+    const cleanUrl = url.replace(/\/+$/, '');
+    try {
+      const res = await fetch(`${cleanUrl}/api/health`, { signal: AbortSignal.timeout(2500) });
+      if (res.ok) {
+        activeBackendUrl = cleanUrl;
+        await chrome.storage.local.set({ backendUrl: cleanUrl });
+        elements.statusDot.className = 'status-dot online';
+        elements.statusText.textContent = 'Server Online';
+        return cleanUrl;
+      }
+    } catch (e) {
+      // Try next candidate
+    }
+  }
 
-  // Show onboarding prompt if keys are missing
-  checkMissingKeys(userGroqKey, userGeminiKey);
+  // If local server is not running
+  elements.statusDot.className = 'status-dot warning';
+  elements.statusText.textContent = 'Server Offline';
+  return activeBackendUrl;
+}
 
-  // Check microphone access
-  await ensureMicrophonePermission(false);
-
-  // 2. Check active tab
-  await checkActiveTab();
-
-  // 3. Check backend health
-  checkBackendHealth(OFFICIAL_BACKEND_URL);
-
-  // 4. Restore state
-  await restoreState();
-
-  // 5. Setup event listeners
-  setupEventListeners();
-});
-
-// Check if API keys are configured
-function checkMissingKeys(groqKey, geminiKey) {
-  if (!groqKey || !geminiKey) {
-    elements.missingKeysAlert.classList.remove('hidden');
+// Update API key alert banner
+function updateAPIKeyStatus(groqKey, geminiKey) {
+  if (geminiKey || groqKey) {
+    if (elements.missingKeysAlert) elements.missingKeysAlert.classList.add('hidden');
   } else {
-    elements.missingKeysAlert.classList.add('hidden');
+    if (elements.missingKeysAlert) elements.missingKeysAlert.classList.remove('hidden');
   }
 }
 
-// Check if current tab is a Google Meet call
+// Initialize Popup
+document.addEventListener('DOMContentLoaded', async () => {
+  // 1. Load saved settings (API keys)
+  const savedData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
+  
+  userGroqKey = savedData.groqApiKey || '';
+  userGeminiKey = savedData.geminiApiKey || '';
+
+  if (elements.groqApiKeyInput && userGroqKey) elements.groqApiKeyInput.value = userGroqKey;
+  if (elements.geminiApiKeyInput && userGeminiKey) elements.geminiApiKeyInput.value = userGeminiKey;
+
+  updateAPIKeyStatus(userGroqKey, userGeminiKey);
+
+  // 2. Auto-discover backend dynamically
+  autoDiscoverBackend();
+
+  // 3. Check microphone access
+  await ensureMicrophonePermission(false);
+
+  // 4. Check active Google Meet tab & dynamically detect attendees
+  await checkActiveTab();
+
+  // 5. Restore state
+  await restoreState();
+
+  // 6. Setup event listeners
+  setupEventListeners();
+});
+
+// Check if current tab is a Google Meet call and dynamically detect participants
 async function checkActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -138,6 +172,37 @@ async function checkActiveTab() {
       elements.meetDetectedBadge.textContent = 'Meet Ready';
       elements.meetDetectedBadge.className = 'pill-badge';
       elements.startRecordingBtn.disabled = false;
+
+      // Query content script for dynamic live participant discovery
+      try {
+        chrome.tabs.sendMessage(tab.id, { type: 'GET_MEET_PARTICIPANTS' }, (res) => {
+          if (res && res.participants) {
+            const { selfName, remoteParticipants, allParticipants } = res.participants;
+            const namesList = [];
+
+            if (selfName) {
+              namesList.push(`${selfName} (You)`);
+            }
+            if (Array.isArray(remoteParticipants)) {
+              remoteParticipants.forEach(p => {
+                if (p && p !== selfName && !namesList.includes(p)) namesList.push(p);
+              });
+            } else if (Array.isArray(allParticipants)) {
+              allParticipants.forEach(p => {
+                if (p && p !== selfName && !namesList.includes(p)) namesList.push(p);
+              });
+            }
+
+            if (namesList.length > 0 && elements.detectedParticipantsRow && elements.detectedParticipantsText) {
+              elements.detectedParticipantsText.textContent = namesList.join(', ');
+              elements.detectedParticipantsRow.classList.remove('hidden');
+            }
+          }
+        });
+      } catch (pErr) {
+        console.warn('Could not query participants:', pErr);
+      }
+
     } else {
       elements.activeTabTitle.textContent = tab ? (tab.title || 'Non-Meet Tab') : 'No tab detected';
       elements.notMeetAlert.classList.remove('hidden');
@@ -146,59 +211,11 @@ async function checkActiveTab() {
       elements.meetDetectedBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
       elements.meetDetectedBadge.style.color = '#fcd34d';
       elements.meetDetectedBadge.style.background = 'rgba(245, 158, 11, 0.15)';
+      if (elements.detectedParticipantsRow) elements.detectedParticipantsRow.classList.add('hidden');
     }
   } catch (err) {
     console.error('Error querying active tab:', err);
   }
-}
-
-// Check if Express backend is running and keys are configured
-async function checkBackendHealth(url) {
-  const cleanGivenUrl = (url || 'https://meet-scribe-five.vercel.app').trim().replace(/\/+$/, '');
-  const portsToTry = [cleanGivenUrl];
-  if (!cleanGivenUrl.includes('vercel.app')) {
-    if (!cleanGivenUrl.includes(':3001')) portsToTry.push('http://localhost:3001');
-    if (!cleanGivenUrl.includes(':3000')) portsToTry.push('http://localhost:3000');
-  }
-
-  for (const testUrl of portsToTry) {
-    try {
-      const cleanTest = testUrl.trim().replace(/\/+$/, '');
-      const res = await fetch(`${cleanTest}/api/health`, { method: 'GET' });
-      if (res.ok) {
-        const data = await res.json();
-        
-        // If detected on a fallback port, update active URL
-        if (cleanTest !== cleanGivenUrl) {
-          defaultBackendUrl = cleanTest;
-          elements.backendUrlInput.value = cleanTest;
-          await chrome.storage.local.set({ backendUrl: cleanTest });
-        }
-
-        // Keys are valid if either backend has .env configured OR user entered them in popup
-        const storageKeys = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
-        const hasGroq = Boolean(data.config?.groqConfigured || userGroqKey || storageKeys.groqApiKey);
-        const hasGemini = Boolean(data.config?.geminiConfigured || userGeminiKey || storageKeys.geminiApiKey);
-
-        if (!hasGroq || !hasGemini) {
-          elements.statusDot.className = 'status-dot warning';
-          elements.statusText.textContent = 'Keys Missing';
-          elements.missingKeysAlert.classList.remove('hidden');
-        } else {
-          elements.statusDot.className = 'status-dot online';
-          elements.statusText.textContent = 'Online';
-          elements.missingKeysAlert.classList.add('hidden');
-        }
-        return;
-      }
-    } catch (err) {
-      // Continue to next port candidate
-    }
-  }
-
-  // If all failed:
-  elements.statusDot.className = 'status-dot offline';
-  elements.statusText.textContent = 'Offline';
 }
 
 // Show a specific UI view
@@ -241,19 +258,13 @@ async function restoreState() {
     populateResults(data.lastResults);
   } else if (state === 'error') {
     showView('error');
-    const err = data.lastError || '';
-    const isNetworkErr = err.includes('Failed to fetch') || err.includes('network') || err.includes('offline');
-    if (isNetworkErr) {
-      elements.errorMessageText.textContent = 'Internet connection lost. Your complete meeting audio has been safely saved to your Downloads folder (MeetScribe_Urdu/Backup_...).';
-    } else {
-      elements.errorMessageText.textContent = err || 'An error occurred during meeting recording or transcription.';
-    }
+    elements.errorMessageText.textContent = data.lastError || 'An error occurred during meeting processing.';
   } else {
     showView('idle');
   }
 }
 
-// Timer logic
+// Live timer
 function startTimer(startTime) {
   if (timerInterval) clearInterval(timerInterval);
 
@@ -289,13 +300,9 @@ function populateResults(data) {
 function switchTab(tab) {
   activeTabType = tab;
 
-  // Reset tab button styles
   const allBtns = [elements.tabBtnUrTrans, elements.tabBtnEnTrans, elements.tabBtnUrAct, elements.tabBtnEnAct];
-  allBtns.forEach(btn => {
-    btn.className = 'tab-btn';
-  });
+  allBtns.forEach(btn => { btn.className = 'tab-btn'; });
 
-  // Hide all content containers
   elements.tabContentUrTrans.classList.add('hidden');
   elements.tabContentEnTrans.classList.add('hidden');
   elements.tabContentUrAct.classList.add('hidden');
@@ -355,14 +362,7 @@ function setupEventListeners() {
   if (elements.missingKeysAlert) {
     elements.missingKeysAlert.addEventListener('click', () => {
       elements.settingsPanel.classList.remove('hidden');
-      elements.groqApiKeyInput.focus();
-    });
-  }
-
-  // Mic Permission Alert Click
-  if (elements.micPermissionAlert) {
-    elements.micPermissionAlert.addEventListener('click', async () => {
-      await ensureMicrophonePermission(true);
+      elements.geminiApiKeyInput.focus();
     });
   }
 
@@ -384,7 +384,7 @@ function setupEventListeners() {
     });
   }
 
-  // Save settings (API keys only - server is managed)
+  // Save API keys
   elements.saveSettingsBtn.addEventListener('click', async () => {
     const groqKey = elements.groqApiKeyInput.value.trim();
     const geminiKey = elements.geminiApiKeyInput.value.trim();
@@ -394,13 +394,10 @@ function setupEventListeners() {
       geminiApiKey: geminiKey
     });
 
-    defaultBackendUrl = OFFICIAL_BACKEND_URL;
     userGroqKey = groqKey;
     userGeminiKey = geminiKey;
+    updateAPIKeyStatus(groqKey, geminiKey);
 
-    checkMissingKeys(groqKey, geminiKey);
-
-    // Show temporary saved indicator
     if (elements.settingsSavedIndicator) {
       elements.settingsSavedIndicator.classList.remove('hidden');
       setTimeout(() => {
@@ -411,40 +408,19 @@ function setupEventListeners() {
     setTimeout(() => {
       elements.settingsPanel.classList.add('hidden');
     }, 800);
-
-    checkBackendHealth(OFFICIAL_BACKEND_URL);
   });
 
   // Start Recording
   elements.startRecordingBtn.addEventListener('click', async () => {
-    // 1. Ensure microphone permission is granted in extension context
     const micGranted = await ensureMicrophonePermission(true);
-    if (!micGranted) {
-      return;
-    }
-
-    // 2. Check if keys are set
-    const data = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
-    const groqKey = data.groqApiKey || userGroqKey;
-    const geminiKey = data.geminiApiKey || userGeminiKey;
-
-    if (!groqKey || !geminiKey) {
-      elements.settingsPanel.classList.remove('hidden');
-      if (!groqKey) elements.groqApiKeyInput.focus();
-      else elements.geminiApiKeyInput.focus();
-      alert('Please enter your Groq and Gemini API keys in Settings before recording.');
-      return;
-    }
+    if (!micGranted) return;
 
     elements.startRecordingBtn.disabled = true;
     showView('recording');
     startTimer(Date.now());
 
     chrome.runtime.sendMessage({
-      type: 'START_RECORDING',
-      backendUrl: OFFICIAL_BACKEND_URL,
-      groqApiKey: groqKey,
-      geminiApiKey: geminiKey
+      type: 'START_RECORDING'
     }, (response) => {
       elements.startRecordingBtn.disabled = false;
       if (response && !response.success) {
@@ -480,15 +456,13 @@ function setupEventListeners() {
     try {
       await navigator.clipboard.writeText(textToCopy);
       elements.copyBtnText.textContent = 'Copied!';
-      setTimeout(() => {
-        elements.copyBtnText.textContent = 'Copy';
-      }, 2000);
+      setTimeout(() => { elements.copyBtnText.textContent = 'Copy'; }, 2000);
     } catch (err) {
       console.error('Clipboard copy failed:', err);
     }
   });
 
-  // Re-download All Files into a dedicated folder
+  // Re-download All Files into folder
   elements.downloadAllBtn.addEventListener('click', async () => {
     if (!currentResults) return;
     const now = new Date();
@@ -524,7 +498,7 @@ function setupEventListeners() {
   });
 }
 
-// Listen for storage changes in background/offscreen
+// Listen for storage changes
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local') {
     if (changes.recordingState) {

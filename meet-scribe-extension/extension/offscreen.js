@@ -1,27 +1,56 @@
 /**
- * MeetScribe Urdu - Offscreen Document Script
- * Captures tab audio stream, routes audio to speakers (preventing tab muting),
- * records WebM audio, directly uploads to backend, and triggers 4 file downloads.
- * 
- * Note: Offscreen documents have no direct access to chrome.storage or chrome.downloads.
- * DOM APIs (<a> download, Web Audio, fetch, MediaRecorder) and chrome.runtime messaging are used.
+ * MeetScribe Urdu - Offscreen Document Script (High-Definition Audio Recorder & Downloader)
+ * Features:
+ * 1. Hardware Acoustic Echo Cancellation (AEC) & AI Noise Suppression (removes room echo & fan hiss).
+ * 2. Web Audio DSP processing: High-Pass Rumble Filter (85Hz) + Broadcast Dynamics Compressor.
+ * 3. Dual-channel mixing (Tab Audio + Cleaned Mic) with speaker passthrough (prevents tab muting).
+ * 4. Compiles and IMMEDIATELY downloads crystal-clear 0_meeting_audio.webm (128kbps Opus) before AI calls.
+ * 5. Zero audio bytes are uploaded over the network.
  */
 
 let mediaRecorder = null;
 let recordedChunks = [];
 let mediaStream = null;
 let activeAudioContext = null;
-let currentBackendUrl = 'https://meet-scribe-five.vercel.app';
-let userGroqApiKey = '';
-let userGeminiApiKey = '';
-let activeParticipants = [];
+let activeMicGainNode = null;
+let activeMicTrack = null;
+let isMeetMicMuted = false;
+let rawStreams = [];
+let currentMeetingFolder = '';
 
-// Trigger download into a specific folder in Downloads
+// Helper: Dynamically mute/unmute local microphone stream based on Google Meet status
+function setMicMuteState(isMuted) {
+  isMeetMicMuted = Boolean(isMuted);
+  console.log(`[Offscreen] Mic Sync: Local Mic is ${isMeetMicMuted ? 'MUTED' : 'UNMUTED'}`);
+
+  if (activeMicTrack) {
+    try { activeMicTrack.enabled = !isMeetMicMuted; } catch (e) {}
+  }
+
+  if (activeMicGainNode && activeAudioContext && activeAudioContext.state !== 'closed') {
+    try {
+      const now = activeAudioContext.currentTime;
+      activeMicGainNode.gain.cancelScheduledValues(now);
+      const targetGain = isMeetMicMuted ? 0.0 : 1.0;
+      activeMicGainNode.gain.setValueAtTime(targetGain, now);
+    } catch (e) {}
+  }
+}
+
+// Generate unique meeting folder name: MeetScribe_Urdu/Meeting_YYYY-MM-DD_HH-MM
+function generateMeetingFolderName() {
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10);
+  const timeStr = String(now.getHours()).padStart(2, '0') + '-' + String(now.getMinutes()).padStart(2, '0');
+  return `MeetScribe_Urdu/Meeting_${dateStr}_${timeStr}`;
+}
+
+// Trigger download of a Blob into the specified folder in Downloads
 async function downloadFileToFolder(folderName, filename, blob) {
   const fullPath = folderName ? `${folderName}/${filename}` : filename;
   const blobUrl = URL.createObjectURL(blob);
 
-  // 1. Try sending to background service worker for native folder creation in Downloads
+  // 1. Send to background service worker for native folder creation in Downloads
   try {
     const res = await chrome.runtime.sendMessage({
       type: 'EXECUTE_DOWNLOAD',
@@ -46,23 +75,9 @@ async function downloadFileToFolder(folderName, filename, blob) {
   setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
 }
 
-// Download the recorded audio AND the 4 distinct meeting notes files into a dedicated subfolder
-async function triggerAllDownloads(data, audioBlob) {
-  const now = new Date();
-  const dateStr = now.toISOString().slice(0, 10);
-  const timeStr = String(now.getHours()).padStart(2, '0') + '-' + String(now.getMinutes()).padStart(2, '0');
-  const folderName = `MeetScribe_Urdu/Meeting_${dateStr}_${timeStr}`;
-
-  console.log(`[Offscreen] Initiating download of audio and notes into folder: ${folderName}...`);
-
-  // 1. Download the original recorded .webm audio file into folder
-  if (audioBlob && audioBlob.size > 0) {
-    console.log(`[Offscreen] Downloading recorded audio into ${folderName}/0_meeting_audio.webm...`);
-    await downloadFileToFolder(folderName, '0_meeting_audio.webm', audioBlob);
-    await new Promise(resolve => setTimeout(resolve, 350));
-  }
-
-  // 2. Download the 4 structured text files into folder
+// Download 4 distinct meeting notes files into the meeting subfolder
+async function downloadStructuredNotesFiles(folderName, data) {
+  const targetFolder = folderName || currentMeetingFolder || generateMeetingFolderName();
   const utf8BOM = '\uFEFF';
   const files = [
     { name: '1_transcript_urdu.txt', content: data.transcript_urdu || '' },
@@ -71,26 +86,25 @@ async function triggerAllDownloads(data, audioBlob) {
     { name: '4_action_items_english_improved.txt', content: data.action_items_english_improved || '' }
   ];
 
+  console.log(`[Offscreen] Downloading 4 notes files into folder: ${targetFolder}...`);
+
   for (const file of files) {
     const textBlob = new Blob([utf8BOM + (file.content || '')], { type: 'text/plain;charset=utf-8' });
-    await downloadFileToFolder(folderName, file.name, textBlob);
+    await downloadFileToFolder(targetFolder, file.name, textBlob);
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 }
 
-let rawStreams = [];
-
-// Start tab recording with dual-channel (Tab Audio + User Microphone) mixing and audio passthrough
-async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
-  currentBackendUrl = backendUrl || 'https://meet-scribe-five.vercel.app';
-  userGroqApiKey = groqKey || '';
-  userGeminiApiKey = geminiKey || '';
+// Start dual-channel audio recording with Echo Cancellation & Noise Suppression DSP
+async function startRecording(streamId, initialMuteState = false) {
+  isMeetMicMuted = Boolean(initialMuteState);
   recordedChunks = [];
   rawStreams = [];
+  currentMeetingFolder = generateMeetingFolderName();
 
-  console.log(`[Offscreen] Starting mixed audio capture (Tab + Mic) with streamId: ${streamId}`);
+  console.log(`[Offscreen] Starting studio audio capture (AEC + Noise Suppression) with streamId: ${streamId}`);
 
-  // 1. Capture Google Meet Tab Audio (Remote participants)
+  // 1. Capture Google Meet Tab Audio (Remote attendees)
   let tabStream = null;
   try {
     tabStream = await navigator.mediaDevices.getUserMedia({
@@ -103,66 +117,95 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
       video: false
     });
     rawStreams.push(tabStream);
-    console.log('[Offscreen] Google Meet tab audio stream acquired.');
+    console.log('[Offscreen] Google Meet tab audio acquired.');
   } catch (tabErr) {
     console.error('[Offscreen] Failed to acquire tab audio stream:', tabErr);
     throw new Error(`Failed to capture tab audio: ${tabErr.message}`);
   }
 
-  // 2. Capture User's Microphone (Current user speaking)
+  // 2. Capture User Microphone with Acoustic Echo Cancellation & Noise Suppression
   let micStream = null;
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: true,
+        echoCancellation: true,     // Critical: Removes speaker-to-mic feedback loop and room echo
+        noiseSuppression: true,     // Critical: Filters background fan, AC, and ambient room noise
+        autoGainControl: true,      // Normalizes speaker volume
+        sampleRate: 48000,
         channelCount: 1
       },
       video: false
     });
     rawStreams.push(micStream);
-    console.log('[Offscreen] User microphone stream acquired with high fidelity.');
+    console.log('[Offscreen] User microphone acquired with Hardware Echo Cancellation & Noise Suppression.');
   } catch (micErr) {
-    console.warn('[Offscreen] Microphone not accessible, proceeding with tab audio only:', micErr);
+    console.warn('[Offscreen] Microphone capture with constraints failed, attempting basic fallback:', micErr);
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      rawStreams.push(micStream);
+    } catch (fallbackErr) {
+      console.warn('[Offscreen] Microphone access unavailable (recording tab audio only):', fallbackErr);
+    }
   }
 
-  // 3. Setup AudioContext Mixer
-  activeAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+  // 3. AudioContext Setup: Mix Tab Audio + Mic with DSP Filters
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  activeAudioContext = new AudioContextClass({ sampleRate: 48000 });
   if (activeAudioContext.state === 'suspended') {
     await activeAudioContext.resume();
   }
 
-  const mixerDestination = activeAudioContext.createMediaStreamDestination();
+  const destinationNode = activeAudioContext.createMediaStreamDestination();
 
-  // Connect Tab Audio to Mixer (for recording) AND to Speakers (so user hears other attendees)
-  if (tabStream && tabStream.getAudioTracks().length > 0) {
-    const tabSource = activeAudioContext.createMediaStreamSource(tabStream);
-    tabSource.connect(mixerDestination);
-    tabSource.connect(activeAudioContext.destination);
-  }
+  // Studio Dynamics Compressor Node: Prevents vocal clipping and levels out audio smoothly
+  const compressor = activeAudioContext.createDynamicsCompressor();
+  compressor.threshold.setValueAtTime(-24, activeAudioContext.currentTime); // dB
+  compressor.knee.setValueAtTime(30, activeAudioContext.currentTime);       // dB
+  compressor.ratio.setValueAtTime(3.5, activeAudioContext.currentTime);     // Compression ratio
+  compressor.attack.setValueAtTime(0.003, activeAudioContext.currentTime);  // Seconds
+  compressor.release.setValueAtTime(0.25, activeAudioContext.currentTime);  // Seconds
 
-  // Connect Mic Audio to Mixer ONLY with Gain Boost (do NOT connect to speakers to avoid echo)
+  // Route Compressor -> Destination
+  compressor.connect(destinationNode);
+
+  // A. Route Tab Audio -> Speakers (Passthrough so user hears meeting) AND -> Compressor -> Recorder
+  const tabSourceNode = activeAudioContext.createMediaStreamSource(tabStream);
+  tabSourceNode.connect(activeAudioContext.destination); // Play to local speakers
+  tabSourceNode.connect(compressor);                     // Send clean tab audio to recorder
+
+  // B. Route Mic -> Highpass Filter (85Hz) -> Gain -> Compressor -> Recorder
+  // Note: Mic is NEVER connected to activeAudioContext.destination (prevents local user hearing themselves)
   if (micStream && micStream.getAudioTracks().length > 0) {
-    const micSource = activeAudioContext.createMediaStreamSource(micStream);
-    const micGain = activeAudioContext.createGain();
-    micGain.gain.value = 1.3;
-    micSource.connect(micGain);
-    micGain.connect(mixerDestination);
+    activeMicTrack = micStream.getAudioTracks()[0];
+    const micSourceNode = activeAudioContext.createMediaStreamSource(micStream);
+
+    // High-Pass Filter: Cuts out desk thumps, low AC hum, and breathing pops below 85Hz
+    const highpassFilter = activeAudioContext.createBiquadFilter();
+    highpassFilter.type = 'highpass';
+    highpassFilter.frequency.setValueAtTime(85, activeAudioContext.currentTime);
+    highpassFilter.Q.setValueAtTime(0.7, activeAudioContext.currentTime);
+
+    activeMicGainNode = activeAudioContext.createGain();
+    const initialGain = isMeetMicMuted ? 0.0 : 1.0;
+    activeMicGainNode.gain.setValueAtTime(initialGain, activeAudioContext.currentTime);
+    if (activeMicTrack) activeMicTrack.enabled = !isMeetMicMuted;
+
+    micSourceNode.connect(highpassFilter);
+    highpassFilter.connect(activeMicGainNode);
+    activeMicGainNode.connect(compressor);
   }
 
-  // 4. Initialize MediaRecorder on the combined mixed stream
-  mediaStream = mixerDestination.stream;
+  mediaStream = destinationNode.stream;
 
-  const options = {
-    mimeType: 'audio/webm;codecs=opus',
-    audioBitsPerSecond: 64000 // 64kbps Opus: broadcast-grade voice quality + ultra-efficient file size for 2+ hour meetings
-  };
-  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-    mediaRecorder = new MediaRecorder(mediaStream, { audioBitsPerSecond: 64000 });
-  } else {
-    mediaRecorder = new MediaRecorder(mediaStream, options);
-  }
+  // 4. Initialize MediaRecorder (128kbps Opus WebM for studio-clear audio)
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : 'audio/webm';
+
+  mediaRecorder = new MediaRecorder(mediaStream, {
+    mimeType: mimeType,
+    audioBitsPerSecond: 128000 // 128kbps high definition
+  });
 
   mediaRecorder.ondataavailable = (event) => {
     if (event.data && event.data.size > 0) {
@@ -170,159 +213,103 @@ async function startRecording(streamId, backendUrl, groqKey, geminiKey) {
     }
   };
 
-  mediaRecorder.onstop = async () => {
-    console.log(`[Offscreen] MediaRecorder stopped. Total chunks: ${recordedChunks.length}`);
-    // Clean up audio graph only after all chunks are received
-    cleanUpAudioStreams();
-    await processAndUploadAudio();
-  };
-
-  // Start recording with 1-second timeslices
   mediaRecorder.start(1000);
-  console.log('[Offscreen] Dual-channel recording (Tab Audio + User Mic) active.');
+  console.log(`[Offscreen] Crystal-clear audio recorder started (Opus 128kbps, AEC + Noise Suppression active).`);
 }
 
-// Clean up audio streams and context
-function cleanUpAudioStreams() {
-  console.log('[Offscreen] Cleaning up audio tracks and audio context...');
-  if (rawStreams && rawStreams.length > 0) {
-    rawStreams.forEach(stream => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
-    });
-    rawStreams = [];
-  }
-
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
-    mediaStream = null;
-  }
-
-  if (activeAudioContext && activeAudioContext.state !== 'closed') {
-    activeAudioContext.close().catch(() => {});
-    activeAudioContext = null;
-  }
-}
-
-// Stop recording safely
+// Stop recording and immediately download local 0_meeting_audio.webm before AI calls
 async function stopRecording() {
-  console.log('[Offscreen] Stopping recording...');
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+  return new Promise((resolve, reject) => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      resolve({ success: true, folderName: currentMeetingFolder });
+      return;
+    }
+
+    mediaRecorder.onstop = async () => {
+      try {
+        console.log(`[Offscreen] MediaRecorder stopped. Total chunks: ${recordedChunks.length}`);
+
+        // Clean up hardware streams and AudioContext
+        rawStreams.forEach(stream => {
+          if (stream && stream.getTracks) {
+            stream.getTracks().forEach(track => track.stop());
+          }
+        });
+        rawStreams = [];
+
+        if (activeAudioContext && activeAudioContext.state !== 'closed') {
+          try { await activeAudioContext.close(); } catch (e) {}
+        }
+        activeAudioContext = null;
+        activeMicGainNode = null;
+        activeMicTrack = null;
+
+        // Compile audio Blob
+        const audioBlob = new Blob(recordedChunks, { type: 'audio/webm' });
+        console.log(`[Offscreen] Compiled crystal-clear audio: ${(audioBlob.size / (1024 * 1024)).toFixed(2)} MB`);
+
+        // IMMEDIATELY download audio to local Downloads folder BEFORE any cloud/AI call
+        if (audioBlob.size > 0) {
+          console.log(`[Offscreen] Instantly downloading 0_meeting_audio.webm into ${currentMeetingFolder}...`);
+          chrome.runtime.sendMessage({
+            type: 'OFFSCREEN_STATUS_UPDATE',
+            state: 'processing',
+            step: 'Saving local meeting audio (.webm) to Downloads...'
+          }).catch(() => {});
+
+          await downloadFileToFolder(currentMeetingFolder, '0_meeting_audio.webm', audioBlob);
+          await new Promise(r => setTimeout(r, 400));
+        }
+
+        resolve({
+          success: true,
+          audioSize: audioBlob.size,
+          folderName: currentMeetingFolder
+        });
+
+      } catch (err) {
+        console.error('[Offscreen] Error finalizing audio recording:', err);
+        resolve({ success: true, folderName: currentMeetingFolder });
+      }
+    };
+
     try {
       mediaRecorder.requestData();
     } catch (e) {}
     mediaRecorder.stop();
-  } else {
-    cleanUpAudioStreams();
-  }
-}
-
-// Upload recorded WebM to Express backend directly
-async function processAndUploadAudio() {
-  try {
-    const audioBlob = new Blob(recordedChunks, { type: 'audio/webm' });
-    console.log(`[Offscreen] Prepared audio blob of size: ${audioBlob.size} bytes`);
-
-    if (audioBlob.size === 0) {
-      throw new Error('No audio data was recorded. Please ensure the Google Meet tab was playing audio.');
-    }
-
-    // Notify background/popup of processing step
-    chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_STATUS_UPDATE',
-      state: 'processing',
-      step: 'Uploading audio to MeetScribe backend...'
-    }).catch(() => {});
-
-    const formData = new FormData();
-    formData.append('audio', audioBlob, 'meeting-audio.webm');
-    if (userGroqApiKey) formData.append('groqApiKey', userGroqApiKey);
-    if (userGeminiApiKey) formData.append('geminiApiKey', userGeminiApiKey);
-    if (activeParticipants && activeParticipants.length > 0) {
-      formData.append('participants', JSON.stringify(activeParticipants));
-    }
-
-    const headers = {};
-    if (userGroqApiKey) headers['X-Groq-API-Key'] = userGroqApiKey;
-    if (userGeminiApiKey) headers['X-Gemini-API-Key'] = userGeminiApiKey;
-    const cleanBaseUrl = (currentBackendUrl || 'https://meet-scribe-five.vercel.app').trim().replace(/\/+$/, '');
-    console.log(`[Offscreen] Sending POST request to: ${cleanBaseUrl}/api/process-meeting (with participants: ${activeParticipants.join(', ') || 'inferred'})`);
-    
-    // Direct fetch from offscreen document (bypasses service worker timeout!)
-    const response = await fetch(`${cleanBaseUrl}/api/process-meeting`, {
-      method: 'POST',
-      headers: headers,
-      body: formData
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      let parsedErr = errText;
-      try {
-        const jsonErr = JSON.parse(errText);
-        parsedErr = jsonErr.error || errText;
-      } catch (e) {}
-      throw new Error(`Server error (${response.status}): ${parsedErr}`);
-    }
-
-    const result = await response.json();
-    console.log('[Offscreen] Processing response received from backend:', result);
-
-    if (!result.success || !result.data) {
-      throw new Error(result.error || 'Backend failed to process meeting notes.');
-    }
-
-    // Trigger automatic download of the recorded audio and the 4 text files
-    await triggerAllDownloads(result.data, audioBlob);
-
-    // Notify service worker to save results in chrome.storage.local
-    chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_STATUS_UPDATE',
-      state: 'complete',
-      data: result.data
-    }).catch(() => {});
-
-  } catch (err) {
-    console.error('[Offscreen] Error during audio processing/upload:', err);
-
-    // Fallback: Ensure recorded audio is still saved to user's disk even if backend processing failed
-    try {
-      const fallbackAudio = new Blob(recordedChunks, { type: 'audio/webm' });
-      if (fallbackAudio && fallbackAudio.size > 0) {
-        const now = new Date();
-        const dateStr = now.toISOString().slice(0, 10);
-        const folderName = `MeetScribe_Urdu/Backup_${dateStr}`;
-        await downloadFileToFolder(folderName, '0_meeting_audio_backup.webm', fallbackAudio);
-      }
-    } catch (saveErr) {
-      console.warn('[Offscreen] Could not save fallback audio:', saveErr);
-    }
-
-    chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_STATUS_UPDATE',
-      state: 'error',
-      error: err.message || 'An error occurred during audio processing.'
-    }).catch(() => {});
-  }
+  });
 }
 
 // Listen for messages from background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_OFFSCREEN_RECORDING') {
-    startRecording(message.streamId, message.backendUrl, message.groqApiKey, message.geminiApiKey)
-      .then(() => sendResponse({ success: true }))
+    startRecording(message.streamId, message.initialMuteState)
+      .then(() => sendResponse({ success: true, folderName: currentMeetingFolder }))
       .catch((err) => {
         console.error('[Offscreen] Start recording failed:', err);
         sendResponse({ success: false, error: err.message });
       });
-    return true; // Keep response channel open
+    return true;
+
+  } else if (message.type === 'UPDATE_MIC_MUTE_STATE') {
+    setMicMuteState(message.isMuted);
+    sendResponse({ success: true });
+    return true;
+
   } else if (message.type === 'STOP_OFFSCREEN_RECORDING') {
-    activeParticipants = message.participants || [];
     stopRecording()
-      .then(() => sendResponse({ success: true }))
+      .then((res) => sendResponse(res))
       .catch((err) => {
         console.error('[Offscreen] Stop recording failed:', err);
+        sendResponse({ success: false, error: err.message });
+      });
+    return true;
+
+  } else if (message.type === 'DOWNLOAD_NOTES_FILES') {
+    downloadStructuredNotesFiles(message.folderName, message.data)
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => {
+        console.error('[Offscreen] Download notes failed:', err);
         sendResponse({ success: false, error: err.message });
       });
     return true;

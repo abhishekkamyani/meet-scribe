@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MeetScribe Urdu</title>
   <link rel="stylesheet" href="popup.css">
 </head>
@@ -21,38 +22,26 @@
     </div>
 
     <div class="header-actions">
-      <div id="backend-status-badge" class="status-badge">
+      <div id="backend-status-badge" class="status-badge" title="AI Service Status">
         <span id="status-dot" class="status-dot"></span>
         <span id="status-text">Checking...</span>
       </div>
-      <button id="toggle-settings-btn" class="icon-btn" title="Backend Settings">⚙️</button>
+      <button id="toggle-settings-btn" class="icon-btn" title="AI Settings">⚙️</button>
     </div>
   </header>
 
   <!-- Settings Drawer (Hidden by default) -->
   <div id="settings-panel" class="settings-drawer hidden">
     <div class="settings-header">
-      <span>⚙️ AI API Keys</span>
+      <span>⚙️ AI Configuration</span>
       <span id="settings-saved-indicator" class="save-status-msg hidden">Saved! ✓</span>
     </div>
 
-    <!-- Groq API Key -->
+    <!-- Gemini API Key (Primary) -->
     <div class="settings-field">
       <div class="settings-label-row">
-        <span>Groq API Key (Whisper STT)</span>
-        <a href="https://console.groq.com/keys" target="_blank" class="settings-link">Get Free Key ↗</a>
-      </div>
-      <div class="input-group">
-        <input type="password" id="groq-api-key-input" class="input-text" placeholder="gsk_..." autocomplete="off">
-        <button type="button" id="toggle-groq-key-btn" class="toggle-visibility-btn" title="Show/Hide">👁️</button>
-      </div>
-    </div>
-
-    <!-- Gemini API Key -->
-    <div class="settings-field">
-      <div class="settings-label-row">
-        <span>Google Gemini API Key (Notes AI)</span>
-        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="settings-link">Get Free Key ↗</a>
+        <span>Google Gemini API Key (Primary AI)</span>
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="settings-link">Get Free Key ↗</a>
       </div>
       <div class="input-group">
         <input type="password" id="gemini-api-key-input" class="input-text" placeholder="AIza... / AQ..." autocomplete="off">
@@ -60,33 +49,45 @@
       </div>
     </div>
 
+    <!-- Groq API Key (Optional Fallback) -->
+    <div class="settings-field">
+      <div class="settings-label-row">
+        <span>Groq API Key (Optional Fallback)</span>
+        <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" class="settings-link">Get Free Key ↗</a>
+      </div>
+      <div class="input-group">
+        <input type="password" id="groq-api-key-input" class="input-text" placeholder="gsk_..." autocomplete="off">
+        <button type="button" id="toggle-groq-key-btn" class="toggle-visibility-btn" title="Show/Hide">👁️</button>
+      </div>
+    </div>
+
     <button id="save-settings-btn" class="btn-small">Save API Keys</button>
   </div>
 
-  <!-- Alert Banner: Missing API Keys (Shown when keys are not configured) -->
-  <div id="missing-keys-alert" class="alert-banner hidden" style="background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.3); color: #34d399; cursor: pointer;">
+  <!-- Alert Banner: Missing API Keys -->
+  <div id="missing-keys-alert" class="alert-banner alert-banner-keys hidden">
     <span class="alert-icon">🔑</span>
-    <div style="flex: 1;">
-      <div style="font-weight: 700; color: #fff;">Setup Your AI Keys</div>
-      <div style="color: #a7f3d0; margin-top: 1px;">Click here or tap ⚙️ to add your free Groq & Gemini keys to begin.</div>
+    <div class="alert-content">
+      <div class="alert-title">Setup Your Gemini API Key</div>
+      <div class="alert-desc-keys">Click here or tap ⚙️ to add your free Google Gemini API key to start transcribing.</div>
     </div>
   </div>
 
   <!-- Alert Banner: Mic Permission Prompt -->
-  <div id="mic-permission-alert" class="alert-banner hidden" style="background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.35); color: #93c5fd; cursor: pointer;">
+  <div id="mic-permission-alert" class="alert-banner alert-banner-mic hidden">
     <span class="alert-icon">🎙️</span>
-    <div style="flex: 1;">
-      <div style="font-weight: 700; color: #fff;">Enable Microphone Access</div>
-      <div style="color: #bfdbfe; margin-top: 1px;">Click to allow microphone access so your voice is recorded during meetings.</div>
+    <div class="alert-content">
+      <div class="alert-title">Enable Microphone Access</div>
+      <div class="alert-desc-mic">Click to allow microphone access so your voice is recorded locally.</div>
     </div>
   </div>
 
   <!-- Alert Banner: Not on Google Meet -->
   <div id="not-meet-alert" class="alert-banner hidden">
     <span class="alert-icon">⚠️</span>
-    <div>
-      <div style="font-weight: 700;">Not on Google Meet</div>
-      <div style="color: #fde68a; margin-top: 2px;">Please switch to an active Google Meet tab (<code>meet.google.com</code>) to record audio.</div>
+    <div class="alert-content">
+      <div class="alert-title">Not on Google Meet</div>
+      <div class="alert-desc-meet">Please switch to an active Google Meet tab (<code>meet.google.com</code>) to record.</div>
     </div>
   </div>
 
@@ -102,6 +103,9 @@
           <div class="card-text-wrapper">
             <div class="card-label">Active Meeting</div>
             <div id="active-tab-title" class="card-value">Detecting Meet tab...</div>
+            <div id="detected-participants-row" class="card-participants hidden">
+              👥 <span id="detected-participants-text">Detecting participants...</span>
+            </div>
           </div>
         </div>
         <span id="meet-detected-badge" class="pill-badge">Meet Ready</span>
@@ -110,12 +114,12 @@
       <!-- Feature Grid -->
       <div class="feature-grid">
         <div class="feature-box">
-          <div class="feature-title">⚡ Groq Whisper v3</div>
-          <div class="feature-subtitle">Urdu & English Speech-to-Text</div>
+          <div class="feature-title">💬 True Speaker Captions</div>
+          <div class="feature-subtitle">Google Meet Live Extraction</div>
         </div>
         <div class="feature-box">
-          <div class="feature-title">🤖 Gemini Bilingual AI</div>
-          <div class="feature-subtitle">Structured Notes & Actions</div>
+          <div class="feature-title">🎙️ Studio Audio .webm</div>
+          <div class="feature-subtitle">Echo &amp; Noise Cancelled</div>
         </div>
       </div>
 
@@ -125,16 +129,16 @@
         <span>Start Meeting Recording</span>
       </button>
 
-      <div class="font-urdu" style="font-size: 11px; text-align: center; color: var(--text-subtle);">
-        میٹنگ آڈیو ریکارڈ کرنے کے لیے بٹن دبائیں۔
+      <div class="font-urdu idle-hint-urdu">
+        کیپشنز اور لوکل آڈیو ریکارڈ کرنے کے لیے بٹن دبائیں۔
       </div>
     </div>
 
     <!-- 2. RECORDING VIEW -->
-    <div id="view-recording" class="view-panel hidden" style="text-align: center;">
+    <div id="view-recording" class="view-panel view-panel-center hidden">
       <div class="recording-indicator">
         <span class="pulse-dot"></span>
-        <span>RECORDING MEETING AUDIO</span>
+        <span>RECORDING &amp; CAPTURING CAPTIONS</span>
       </div>
 
       <!-- Animated Waveform -->
@@ -152,43 +156,43 @@
       <!-- Live Elapsed Timer -->
       <div>
         <div id="recording-timer" class="timer-display">00:00</div>
-        <div class="timer-subtext">Audio passthrough active (meeting audio is audible)</div>
+        <div class="timer-subtext">Google Meet CC live + studio noise cancellation active</div>
       </div>
 
       <!-- Stop Button -->
       <button id="stop-recording-btn" class="btn-danger">
         <span>⏹</span>
-        <span>Stop & Process Notes</span>
+        <span>Stop &amp; Process Notes</span>
       </button>
     </div>
 
     <!-- 3. PROCESSING VIEW -->
-    <div id="view-processing" class="view-panel hidden" style="text-align: center; padding-top: 10px;">
+    <div id="view-processing" class="view-panel view-panel-center view-processing-pad hidden">
       <div class="spinner-wrapper">
         <div class="spinner-ring"></div>
         <div class="spinner-icon">🤖</div>
       </div>
 
       <div>
-        <div style="font-size: 15px; font-weight: 700; color: #fff;">Processing Meeting Audio</div>
-        <div id="processing-step-label" style="font-size: 11.5px; color: #34d399; margin-top: 3px;">
-          Uploading audio to backend...
+        <div class="processing-title">Processing Meeting Notes</div>
+        <div id="processing-step-label" class="processing-step">
+          Saving local audio (.webm) and extracting captions...
         </div>
       </div>
 
       <!-- Pipeline Steps -->
       <div class="steps-box">
-        <div class="step-item done">
-          <span>✓</span> <span>Captured tab audio (.webm Opus)</span>
-        </div>
         <div class="step-item active">
-          <span>▶</span> <span>Groq Whisper-large-v3 Speech-to-Text (Urdu)</span>
+          <span>▶</span> <span>Saving local 0_meeting_audio.webm to Downloads</span>
         </div>
         <div class="step-item">
-          <span>○</span> <span>Gemini Bilingual Structuring & Action Items</span>
+          <span>○</span> <span>Extracting verified speaker-attributed captions</span>
         </div>
         <div class="step-item">
-          <span>○</span> <span>Saving Audio (.webm) & 4 UTF-8 Text Files</span>
+          <span>○</span> <span>Gemini Urdu/English translation &amp; action items</span>
+        </div>
+        <div class="step-item">
+          <span>○</span> <span>Saving 4 structured UTF-8 files to Downloads</span>
         </div>
       </div>
     </div>
@@ -198,10 +202,10 @@
       <!-- Success Banner -->
       <div class="success-banner">
         <div>
-          <div class="success-title">🎉 Meeting Processed & Saved!</div>
-          <div class="success-desc">Audio (.webm) + 4 UTF-8 files saved to Downloads</div>
+          <div class="success-title">🎉 Meeting Notes Saved!</div>
+          <div class="success-desc">Audio (.webm) + 4 UTF-8 files saved in Downloads</div>
         </div>
-        <button id="download-all-btn" class="btn-small" style="padding: 4px 8px; font-size: 10.5px;">
+        <button id="download-all-btn" class="btn-small btn-redownload">
           Re-download
         </button>
       </div>
@@ -221,22 +225,22 @@
         </button>
 
         <!-- Tab 1: Urdu Transcript -->
-        <div id="tab-content-ur-trans" class="preview-urdu" style="white-space: pre-line;">
+        <div id="tab-content-ur-trans" class="preview-urdu preview-pre-line">
           لوڈ ہو رہا ہے...
         </div>
 
         <!-- Tab 2: English Transcript -->
-        <div id="tab-content-en-trans" class="hidden" style="white-space: pre-line; line-height: 1.6;">
+        <div id="tab-content-en-trans" class="preview-eng-trans hidden">
           Loading...
         </div>
 
         <!-- Tab 3: Urdu Action Items -->
-        <div id="tab-content-ur-act" class="preview-urdu hidden" style="white-space: pre-line; color: #a7f3d0;">
+        <div id="tab-content-ur-act" class="preview-urdu preview-actions-urdu hidden">
           لوڈ ہو رہا ہے...
         </div>
 
         <!-- Tab 4: English Action Items -->
-        <div id="tab-content-en-act" class="hidden" style="white-space: pre-line; color: #a7f3d0; line-height: 1.6;">
+        <div id="tab-content-en-act" class="preview-actions-eng hidden">
           Loading...
         </div>
       </div>
@@ -248,16 +252,16 @@
     </div>
 
     <!-- 5. ERROR VIEW -->
-    <div id="view-error" class="view-panel hidden" style="text-align: center; padding-top: 10px;">
+    <div id="view-error" class="view-panel view-panel-center view-processing-pad hidden">
       <div class="error-icon-box">✕</div>
       <div>
         <div class="error-title">Processing Failed</div>
-        <div id="error-message-text" class="error-details" style="margin-top: 8px;">
+        <div id="error-message-text" class="error-details error-details-pad">
           An error occurred.
         </div>
       </div>
-      <button id="error-retry-btn" class="btn-danger" style="margin-top: 6px;">
-        Dismiss & Try Again
+      <button id="error-retry-btn" class="btn-danger btn-retry-margin">
+        Dismiss &amp; Try Again
       </button>
     </div>
 
@@ -266,7 +270,7 @@
   <!-- Bottom Footer -->
   <footer class="app-footer">
     <span>MeetScribe Urdu v1.0</span>
-    <span>Groq Whisper + Gemini AI</span>
+    <span>Google Meet Captions + Gemini AI</span>
   </footer>
 
   <script src="popup.js"></script>

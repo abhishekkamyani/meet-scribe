@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MeetScribe Urdu - Google Meet AI Transcriber",
   "version": "1.0.0",
-  "description": "Records Google Meet tab audio, transcribes bilingual Urdu/English speech with Groq Whisper, and generates structured AI meeting notes.",
+  "description": "Captures Google Meet live captions and tab audio, transcribes bilingual Urdu/English speech, and generates structured AI meeting notes.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -14,14 +14,22 @@
   ],
   "host_permissions": [
     "https://meet.google.com/*",
-    "https://meet-scribe-five.vercel.app/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
     "https://*.vercel.app/*",
-    "http://localhost:*/*",
-    "http://127.0.0.1:*/*"
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.groq.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "MeetScribe Urdu",
