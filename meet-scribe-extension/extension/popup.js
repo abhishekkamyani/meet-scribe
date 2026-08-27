@@ -176,6 +176,11 @@ async function checkActiveTab() {
       // Query content script for dynamic live participant discovery
       try {
         chrome.tabs.sendMessage(tab.id, { type: 'GET_MEET_PARTICIPANTS' }, (res) => {
+          // M1 fix: check lastError to prevent "Unchecked runtime.lastError" console spam
+          if (chrome.runtime.lastError) {
+            // Content script not yet injected (tab still loading) — silently ignore
+            return;
+          }
           if (res && res.participants) {
             const { selfName, remoteParticipants, allParticipants } = res.participants;
             const namesList = [];
@@ -330,6 +335,9 @@ async function triggerDownload(folderName, filename, content) {
   const blob = new Blob([utf8BOM + content], { type: 'text/plain;charset=utf-8' });
   const blobUrl = URL.createObjectURL(blob);
 
+  // M3 fix: always schedule revocation to prevent memory leak from accumulating blob URLs
+  const revokeAfterDelay = () => setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+
   if (chrome.downloads && chrome.downloads.download) {
     try {
       await chrome.downloads.download({
@@ -337,6 +345,7 @@ async function triggerDownload(folderName, filename, content) {
         filename: fullPath,
         saveAs: false
       });
+      revokeAfterDelay();
       return;
     } catch (e) {
       console.warn('chrome.downloads failed, using anchor tag fallback:', e);
@@ -349,6 +358,7 @@ async function triggerDownload(folderName, filename, content) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  revokeAfterDelay();
 }
 
 // Setup Event Listeners
@@ -402,12 +412,14 @@ function setupEventListeners() {
       elements.settingsSavedIndicator.classList.remove('hidden');
       setTimeout(() => {
         elements.settingsSavedIndicator.classList.add('hidden');
-      }, 2500);
+      }, 2000);
     }
 
+    // N3 fix: close settings panel AFTER the saved indicator is done showing (2000ms)
+    // Previously it closed at 800ms while the indicator was still visible at 2500ms
     setTimeout(() => {
       elements.settingsPanel.classList.add('hidden');
-    }, 800);
+    }, 1800);
   });
 
   // Start Recording
@@ -415,19 +427,27 @@ function setupEventListeners() {
     const micGranted = await ensureMicrophonePermission(true);
     if (!micGranted) return;
 
+    // C4 fix: show a "Starting…" disabled state BEFORE we know if background succeeded.
+    // Do NOT transition to recording view yet — wait for background confirmation.
     elements.startRecordingBtn.disabled = true;
-    showView('recording');
-    startTimer(Date.now());
+    elements.startRecordingBtn.querySelector('span:last-child').textContent = 'Starting…';
 
     chrome.runtime.sendMessage({
       type: 'START_RECORDING'
     }, (response) => {
       elements.startRecordingBtn.disabled = false;
-      if (response && !response.success) {
-        stopTimer();
+      elements.startRecordingBtn.querySelector('span:last-child').textContent = 'Start Meeting Recording';
+
+      if (chrome.runtime.lastError || !response || !response.success) {
+        const errMsg = (response && response.error) || (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Failed to start recording.';
         showView('error');
-        elements.errorMessageText.textContent = response.error || 'Failed to start recording.';
+        elements.errorMessageText.textContent = errMsg;
+        return;
       }
+
+      // Only now show recording view — we have confirmed background success
+      showView('recording');
+      startTimer(response.startTime || Date.now());
     });
   });
 
@@ -435,7 +455,23 @@ function setupEventListeners() {
   elements.stopRecordingBtn.addEventListener('click', () => {
     stopTimer();
     showView('processing');
-    chrome.runtime.sendMessage({ type: 'STOP_RECORDING' });
+
+    // C5 fix: STOP_RECORDING was fire-and-forget — if background threw an error during AI processing,
+    // the popup would be stuck on the processing spinner forever.
+    // Now we listen for the response and show the error view if processing fails.
+    chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }, (response) => {
+      if (chrome.runtime.lastError) {
+        // Background service worker was terminated mid-flight (e.g. browser closed SW)
+        // The storage onChanged listener will restore state when SW comes back up
+        console.warn('[Popup] STOP_RECORDING response lost (SW terminated?):', chrome.runtime.lastError.message);
+        return;
+      }
+      if (response && !response.success) {
+        showView('error');
+        elements.errorMessageText.textContent = response.error || 'Processing failed.';
+      }
+      // Success case is handled by chrome.storage.onChanged → restoreState()
+    });
   });
 
   // Tabs
@@ -506,6 +542,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     if (changes.processingStep && elements.processingStepLabel) {
       elements.processingStepLabel.textContent = changes.processingStep.newValue || 'Processing...';
+    }
+  }
+});
+
+// Listen for direct messages from background (e.g. CC warnings during recording)
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === 'CAPTIONS_NOT_DETECTED') {
+    // Show a warning in the recording view's timer subtext
+    const timerSubtext = document.querySelector('.timer-subtext');
+    if (timerSubtext) {
+      timerSubtext.textContent = '⚠️ Captions not detected — please enable CC in Meet to get transcript';
+      timerSubtext.style.color = '#fbbf24';
     }
   }
 });

@@ -1,9 +1,10 @@
 /**
  * MeetScribe Urdu - Google Meet Content Script
  * 1. Monitors Google Meet microphone mute/unmute state in real-time.
- * 2. Auto-enables Google Meet Closed Captions (CC).
+ * 2. Auto-enables Google Meet Closed Captions (CC) and maintains a persistent Keep-Alive Guardian.
  * 3. Scrapes 100% ground-truth real-time speaker-attributed captions from Google Meet DOM.
- * 4. Extracts verified meeting participants roster.
+ * 4. Stealth Captions Shield: Keeps WebRTC captions stream alive even if user hides subtitles on screen.
+ * 5. Extracts verified meeting participants roster.
  */
 
 let lastMuteState = null;
@@ -11,7 +12,10 @@ let debounceTimeout = null;
 let pollInterval = null;
 let domObserver = null;
 let captionsObserver = null;
+let captionsKeepAliveInterval = null;
 let isCapturingCaptions = false;
+let isStealthMode = false;
+let lastCaptionsToggleTime = 0; // Cooldown: prevent keep-alive from re-triggering too soon after a CC click
 
 // Captions Storage: Array of { speaker: string, text: string, timestamp: string }
 let captionsHistory = [];
@@ -52,6 +56,10 @@ function cleanUpScript() {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
+  if (captionsKeepAliveInterval) {
+    clearInterval(captionsKeepAliveInterval);
+    captionsKeepAliveInterval = null;
+  }
   if (pollInterval) {
     clearInterval(pollInterval);
     pollInterval = null;
@@ -60,6 +68,85 @@ function cleanUpScript() {
     clearTimeout(debounceTimeout);
     debounceTimeout = null;
   }
+  removeStealthStyle();
+}
+
+/**
+ * Inject or remove stealth CSS that allows captions to run in the background
+ * without obstructing the user's video tiles or screen share.
+ */
+function injectStealthStyle() {
+  if (document.getElementById('meetscribe-stealth-style')) return;
+  const style = document.createElement('style');
+  style.id = 'meetscribe-stealth-style';
+  style.textContent = `
+    .meetscribe-stealth-active div[jsname="YSxPtf"],
+    .meetscribe-stealth-active div.bh44bd,
+    .meetscribe-stealth-active div.T4LgNb,
+    .meetscribe-stealth-active div.a4cQT,
+    .meetscribe-stealth-active div[role="region"][aria-label*="caption" i] {
+      opacity: 0.001 !important;
+      position: fixed !important;
+      bottom: 0 !important;
+      left: 0 !important;
+      height: 1px !important;
+      max-height: 1px !important;
+      overflow: hidden !important;
+      pointer-events: none !important;
+      z-index: -9999 !important;
+    }
+  `;
+  document.head.appendChild(style);
+  // Stealth fix: actually apply the class to body so the CSS takes effect
+  document.body.classList.add('meetscribe-stealth-active');
+}
+
+function removeStealthStyle() {
+  const style = document.getElementById('meetscribe-stealth-style');
+  if (style) style.remove();
+  document.body.classList.remove('meetscribe-stealth-active');
+}
+
+/**
+ * Check if Google Meet Closed Captions are currently active
+ */
+function isMeetCaptionsActive() {
+  const allButtons = document.querySelectorAll('button, div[role="button"]');
+  for (const btn of allButtons) {
+    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+    const jsname = btn.getAttribute('jsname') || '';
+
+    const isCcBtn =
+      label.includes('caption') ||
+      label.includes('subtitles') ||
+      label.includes('سب ٹائٹل') ||
+      label.includes('کیپشن') ||
+      tooltip.includes('caption') ||
+      tooltip.includes('subtitles') ||
+      tooltip.includes('turn on captions') ||
+      tooltip.includes('turn off captions') ||
+      jsname === 'r8qRAd';
+
+    if (isCcBtn) {
+      const isPressed = btn.getAttribute('aria-pressed') === 'true' ||
+        label.includes('turn off') ||
+        tooltip.includes('turn off');
+      return isPressed;
+    }
+  }
+
+  // Also check for caption container in DOM — but do NOT require text content.
+  // Captions go blank between utterances, causing false "CC is off" detection.
+  const captionDom = document.querySelector([
+    'div[jsname="YSxPtf"]',
+    'div.bh44bd',
+    'div.T4LgNb',
+    '[role="region"][aria-label*="caption" i]',
+    '[aria-live][aria-atomic="false"]'
+  ].join(', '));
+  // Container exists in DOM = CC is on (Google Meet removes it entirely when CC is off)
+  return Boolean(captionDom);
 }
 
 /**
@@ -67,7 +154,6 @@ function cleanUpScript() {
  */
 function ensureCaptionsEnabled() {
   try {
-    // 1. Search for CC toggle button in Google Meet bottom bar
     const allButtons = document.querySelectorAll('button, div[role="button"]');
     let ccBtn = null;
 
@@ -95,15 +181,16 @@ function ensureCaptionsEnabled() {
 
         if (!isPressed) {
           console.log('[MeetScribe] Activating Google Meet Closed Captions via button click...');
+          lastCaptionsToggleTime = Date.now();
           btn.click();
         } else {
-          console.log('[MeetScribe] Google Meet Closed Captions are already ON.');
+          console.log('[MeetScribe] Google Meet Closed Captions are ON.');
         }
         return true;
       }
     }
 
-    // 2. Keyboard shortcut fallback: dispatch 'c' key to toggle captions if button not clicked
+    // Keyboard shortcut fallback: dispatch 'c' key to toggle captions if button not found
     console.log('[MeetScribe] CC button not found directly, triggering "c" shortcut key...');
     const eventDown = new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', keyCode: 67, bubbles: true });
     const eventUp = new KeyboardEvent('keyup', { key: 'c', code: 'KeyC', keyCode: 67, bubbles: true });
@@ -118,42 +205,104 @@ function ensureCaptionsEnabled() {
 }
 
 /**
- * Real-time Closed Captions Scraper & Accumulator
- * Observes Google Meet's native caption container and extracts ground-truth speaker names and text.
+ * Captions Keep-Alive Guardian: Automatically re-enables captions if closed by user/Meet
  */
+function maintainCaptionsKeepAlive() {
+  if (!isCapturingCaptions) return;
+
+  // If we've already successfully captured captions this session, CC is working.
+  // Do NOT click the button — clicking it when CC is ON opens the settings modal.
+  if (captionsHistory.length > 0) return;
+
+  // Cooldown: don't re-trigger keep-alive within 3 seconds of the last toggle attempt
+  if (Date.now() - lastCaptionsToggleTime < 3000) return;
+
+  if (!isMeetCaptionsActive()) {
+    console.log('[MeetScribe] CC was toggled OFF while recording is active — auto-recovering captions stream...');
+    ensureCaptionsEnabled();
+  }
+}
+
+/**
+ * Real-time Closed Captions Scraper & Accumulator
+ * Uses a multi-layer detection strategy to survive Google Meet DOM changes:
+ * Layer 1: Known jsname/class selectors (most specific, can go stale)
+ * Layer 2: Semantic ARIA attributes (stable across Meet versions)
+ * Layer 3: Broad aria-live sweep (last resort, catches anything)
+ */
+function findCaptionContainer() {
+  // Layer 1: Known selectors
+  const knownSelectors = [
+    'div[jsname="YSxPtf"]',
+    'div.bh44bd',
+    'div.T4LgNb',
+    'div.a4cQT',
+  ];
+  for (const sel of knownSelectors) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+
+  // Layer 2: Semantic ARIA — stable across Meet UI updates
+  const ariaSelectors = [
+    '[role="region"][aria-label*="caption" i]',
+    '[role="region"][aria-label*="subtitle" i]',
+    '[role="region"][aria-label*="کیپشن" i]',
+    '[aria-live="polite"][aria-atomic="false"]',
+  ];
+  for (const sel of ariaSelectors) {
+    const el = document.querySelector(sel);
+    if (el && (el.innerText || '').trim().length > 1) return el;
+  }
+
+  // Layer 3: Any aria-live region in the lower half of the screen with text
+  const liveRegions = document.querySelectorAll('[aria-live]');
+  for (const el of liveRegions) {
+    const text = (el.innerText || '').trim();
+    if (text.length < 2) continue;
+    const rect = el.getBoundingClientRect();
+    // Captions appear in lower 50% of screen
+    if (rect.top > window.innerHeight * 0.4 || rect.bottom > window.innerHeight * 0.5) {
+      return el;
+    }
+  }
+
+  return null;
+}
+
 function processCaptionsDOM() {
   try {
-    // Google Meet caption container selectors across various Meet UI versions
-    const captionBlockSelectors = [
+    const container = findCaptionContainer();
+    if (!container) return;
+
+    // Get individual caption blocks (speaker + text pairs)
+    // Try specific child selectors first, fall back to container itself
+    const childSelectors = [
       'div[jsname="YSxPtf"] > div',
       'div.bh44bd > div',
       'div.T4LgNb > div',
       'div.iTTPOb',
       'div.nMx0df',
-      'div[jscontroller="D1tHje"] div[jsname="YSxPtf"] div',
-      'div[role="region"][aria-label*="caption" i] div'
+      '[role="region"][aria-label*="caption" i] > div',
+      '[aria-live][aria-atomic="false"] > div',
     ];
 
-    let captionBlocks = document.querySelectorAll(captionBlockSelectors.join(', '));
+    let captionBlocks = document.querySelectorAll(childSelectors.join(', '));
 
-    // Fallback: search for any container with caption text classes
+    // If no child blocks, treat the container itself as the single block
     if (captionBlocks.length === 0) {
-      captionBlocks = document.querySelectorAll('div[jsname="YSxPtf"], div.bh44bd, div.a4cQT');
+      captionBlocks = [container];
     }
-
-    if (captionBlocks.length === 0) return;
 
     captionBlocks.forEach(block => {
       // 1. Extract Speaker Name
       let speakerName = '';
 
-      // Strategy A: Dedicated speaker name container (.zs75Ib, .NW0r5c, .jxFHg)
       const speakerEl = block.querySelector('.zs75Ib, .NW0r5c, .jxFHg, span.notranslate, div.notranslate, [data-self-name]');
       if (speakerEl) {
         speakerName = (speakerEl.innerText || speakerEl.getAttribute('data-self-name') || '').trim();
       }
 
-      // Strategy B: Speaker avatar image alt attribute (e.g. <img alt="Abhishek Kamyani">)
       if (!speakerName) {
         const imgEl = block.querySelector('img[alt]');
         if (imgEl && imgEl.getAttribute('alt')) {
@@ -164,16 +313,14 @@ function processCaptionsDOM() {
         }
       }
 
-      // Strategy C: Check previous sibling header or parent container
       if (!speakerName) {
-        const parent = block.closest('div[jsname="YSxPtf"], div.bh44bd, div.T4LgNb');
+        const parent = block.closest('div[jsname="YSxPtf"], div.bh44bd, div.T4LgNb, [role="region"]');
         if (parent) {
           const prevHeader = parent.querySelector('.zs75Ib, .NW0r5c, .jxFHg');
           if (prevHeader) speakerName = prevHeader.innerText.trim();
         }
       }
 
-      // Clean up speaker name
       speakerName = speakerName
         .replace(/\s*\((?:You|آپ|Presentation|Host|Meeting host|Guest)\)/ig, '')
         .split('\n')[0]
@@ -188,17 +335,25 @@ function processCaptionsDOM() {
       }
 
       // 2. Extract Spoken Text
+      // Try specific span selectors first, then fall back to full innerText
       const textEls = block.querySelectorAll('span.VbkSUe, span.iTTPOb, div.T4LgNb, .yg3Swb, span[jsname="VbkSUe"]');
       let textContent = '';
 
       if (textEls.length > 0) {
         textContent = Array.from(textEls).map(el => el.innerText || '').join(' ').trim();
-      } else {
-        // If specific text class not found, clone block and remove speaker element
+      }
+
+      // Fallback: clone block, strip speaker element, get all innerText
+      if (!textContent) {
         const clone = block.cloneNode(true);
         const rmSpeaker = clone.querySelector('.zs75Ib, .NW0r5c, .jxFHg, img');
         if (rmSpeaker) rmSpeaker.remove();
         textContent = (clone.innerText || '').trim();
+      }
+
+      // Last resort: use the raw innerText from the block as-is
+      if (!textContent) {
+        textContent = (block.innerText || '').trim();
       }
 
       if (!textContent || textContent.length < 1) return;
@@ -213,7 +368,6 @@ function processCaptionsDOM() {
         const lastEntry = captionsHistory[captionsHistory.length - 1];
 
         if (lastEntry.speaker === speakerName) {
-          // If the new text starts with the old text or extends it, update the entry
           if (textContent.startsWith(lastEntry.text) || lastEntry.text.startsWith(textContent)) {
             if (textContent.length > lastEntry.text.length) {
               lastEntry.text = textContent;
@@ -222,9 +376,7 @@ function processCaptionsDOM() {
             return;
           }
 
-          // If new text is an addition / continuation of the sentence
           if (!lastEntry.text.endsWith(textContent) && !textContent.includes(lastEntry.text)) {
-            // Append if short gap
             lastEntry.text = `${lastEntry.text} ${textContent}`.replace(/\s+/g, ' ').trim();
             lastEntry.timestamp = timeStr;
             return;
@@ -253,20 +405,42 @@ function processCaptionsDOM() {
 }
 
 /**
- * Start observing the captions container in Google Meet DOM
+ * Start observing the captions container in Google Meet DOM with Keep-Alive Guardian
  */
 function startCaptionsObserver() {
   if (captionsObserver) {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
+  if (captionsKeepAliveInterval) {
+    clearInterval(captionsKeepAliveInterval);
+    captionsKeepAliveInterval = null;
+  }
 
   isCapturingCaptions = true;
+  injectStealthStyle();  // Also applies meetscribe-stealth-active class to body
   ensureCaptionsEnabled();
+
+  // Warn if CC still not active 4 seconds after start (user may need to enable it)
+  setTimeout(() => {
+    if (isCapturingCaptions && !isMeetCaptionsActive()) {
+      console.warn('[MeetScribe] WARNING: Google Meet captions do not appear to be active 4s into recording.');
+      safeSendMessage({ type: 'CAPTIONS_NOT_DETECTED' });
+    } else if (isCapturingCaptions) {
+      console.log('[MeetScribe] Captions confirmed active and being captured.');
+    }
+  }, 4000);
+
+  // Keep-alive guardian runs every 3s to re-enable CC if Meet closes it unexpectedly
+  // (interval is intentionally not too aggressive to avoid fighting with user interactions)
+  captionsKeepAliveInterval = setInterval(maintainCaptionsKeepAlive, 3000);
 
   captionsObserver = new MutationObserver(() => {
     if (isCapturingCaptions) {
       processCaptionsDOM();
+      // C7 fix: do NOT call maintainCaptionsKeepAlive() here — on active Meet pages the observer
+      // fires hundreds of times per second, completely defeating the 3s cooldown timer.
+      // Keep-alive runs only on the timed interval (every 3s) set above.
     }
   });
 
@@ -276,7 +450,7 @@ function startCaptionsObserver() {
     characterData: true
   });
 
-  console.log('[MeetScribe Content] Real-time Captions Observer initialized.');
+  console.log('[MeetScribe Content] Real-time Captions Observer & Keep-Alive Guardian active.');
 }
 
 /**
@@ -284,14 +458,17 @@ function startCaptionsObserver() {
  */
 function stopCaptionsObserver() {
   isCapturingCaptions = false;
+  if (captionsKeepAliveInterval) {
+    clearInterval(captionsKeepAliveInterval);
+    captionsKeepAliveInterval = null;
+  }
   if (captionsObserver) {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
+  removeStealthStyle();
 
-  // Final scrape pass to capture any remaining text
   processCaptionsDOM();
-
   return getFormattedCaptions();
 }
 
@@ -299,7 +476,6 @@ function stopCaptionsObserver() {
  * Format accumulated captions into a clean dialogue transcript
  */
 function getFormattedCaptions() {
-  // Merge consecutive entries from the same speaker
   const mergedUtterances = [];
 
   for (const entry of captionsHistory) {
@@ -552,10 +728,16 @@ function initObserver() {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
       setTimeout(triggerStateCheck, 20);
     }
+    // If user presses 'c' to toggle CC while recording, let keep-alive manage it
+    if ((e.key === 'c' || e.key === 'C') && isCapturingCaptions && !e.ctrlKey && !e.metaKey && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
+      setTimeout(maintainCaptionsKeepAlive, 50);
+    }
   });
 
-  window.addEventListener('click', () => {
+  window.addEventListener('click', (e) => {
     setTimeout(triggerStateCheck, 20);
+    // Note: we intentionally do NOT call maintainCaptionsKeepAlive on every click,
+    // as that caused the settings modal to reopen whenever the user closed it.
   });
 
   pollInterval = setInterval(() => {
@@ -570,6 +752,20 @@ function initObserver() {
   notifyMicStateChange();
   extractParticipantNames();
 }
+
+
+// Re-injection guard: background.js may inject this script programmatically to ensure the
+// latest version is running on existing Meet tabs (tabs opened before the extension was loaded/reloaded).
+// This block prevents double message listeners, double observers, and double poll intervals.
+if (window.__meetScribeContentLoaded) {
+  console.log('[MeetScribe] Re-injected into already-active tab \u2014 cleaning up previous instance and reinitializing...');
+  cleanUpScript();
+  isCapturingCaptions = false;
+  captionsHistory = [];
+  lastRecordedSpeaker = '';
+  lastRecordedText = '';
+}
+window.__meetScribeContentLoaded = true;
 
 // Listen for messages from background / popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -608,3 +804,4 @@ if (document.readyState === 'loading') {
 } else {
   initObserver();
 }
+

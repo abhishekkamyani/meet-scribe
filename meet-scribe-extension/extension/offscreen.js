@@ -269,7 +269,8 @@ async function stopRecording() {
 
       } catch (err) {
         console.error('[Offscreen] Error finalizing audio recording:', err);
-        resolve({ success: true, folderName: currentMeetingFolder });
+        // C6 fix: reject so background can detect and handle the failure instead of silently succeeding
+        reject(err);
       }
     };
 

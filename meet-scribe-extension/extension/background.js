@@ -126,8 +126,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         await chrome.storage.local.set({ recordingState: 'starting' });
 
-        // 1. Get active Google Meet tab
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        // C1 fix: query by URL, not by active tab in current window — popup being open would
+        // cause active:true/currentWindow:true to return the popup context instead of Meet.
+        const meetTabs = await chrome.tabs.query({ url: '*://meet.google.com/*' });
+        const tab = meetTabs[0];
         if (!tab || !tab.url || !tab.url.includes('meet.google.com')) {
           await chrome.storage.local.set({ recordingState: 'idle' });
           sendResponse({
@@ -137,15 +139,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        // 2. Start Captions capture in Google Meet tab (auto-enables CC and starts DOM observer)
+        // 2. Inject content script programmatically to guarantee latest version is running.
+        // Manifest content_scripts only inject at page-load time, so if Meet was already open
+        // (before extension install or after a reload), content.js was never there.
+        // chrome.scripting.executeScript fixes this — the guard in content.js handles re-injection safely.
         try {
-          await chrome.tabs.sendMessage(tab.id, { type: 'START_CAPTIONS_CAPTURE' });
-          console.log('[Background] Sent START_CAPTIONS_CAPTURE to Google Meet content script.');
-        } catch (captionsErr) {
-          console.warn('[Background] Could not initialize captions on tab:', captionsErr.message);
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content.js']
+          });
+          console.log('[Background] content.js injected into Meet tab successfully.');
+          // Brief pause to let the script initialize before we message it
+          await new Promise(r => setTimeout(r, 400));
+        } catch (injectErr) {
+          console.warn('[Background] Could not inject content.js (may not have scripting permission or tab is restricted):', injectErr.message);
         }
 
-        // 3. Acquire tab audio stream ID
+        // 3. Start Captions capture in Google Meet tab (auto-enables CC and starts DOM observer)
+        try {
+          const captureRes = await chrome.tabs.sendMessage(tab.id, { type: 'START_CAPTIONS_CAPTURE' });
+          if (captureRes && captureRes.success) {
+            console.log('[Background] START_CAPTIONS_CAPTURE confirmed by content script.');
+          } else {
+            console.warn('[Background] START_CAPTIONS_CAPTURE: unexpected response', captureRes);
+          }
+        } catch (captionsErr) {
+          // Content script not yet injected (e.g. page still loading) — recording continues, captions optional
+          console.warn('[Background] Could not initialize captions on tab (content script may not be ready):', captionsErr.message);
+        }
+
+
+        // 4. Acquire tab audio stream ID
         const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
         if (!streamId) {
           throw new Error('Failed to acquire tabCapture stream ID.');
@@ -191,6 +215,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }).catch(() => {});
         sendResponse({ received: true });
 
+      } else if (message.type === 'CAPTIONS_NOT_DETECTED') {
+        // Content script warns that CC is not active 4s into recording
+        // Forward to popup so user sees an actionable warning
+        await chrome.storage.local.set({
+          processingStep: '⚠️ Google Meet Captions not detected. Please enable CC in Meet (button at the bottom of the screen).'
+        });
+        chrome.runtime.sendMessage({
+          type: 'CAPTIONS_NOT_DETECTED'
+        }).catch(() => {});
+        sendResponse({ received: true });
+
       } else if (message.type === 'STOP_RECORDING') {
         await chrome.storage.local.set({
           recordingState: 'processing',
@@ -200,9 +235,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.action.setBadgeBackgroundColor({ color: '#3B82F6' });
 
         // Step 1: Stop offscreen audio recorder and trigger INSTANT local 0_meeting_audio.webm download
+        // C2 fix: wrap with a timeout so a crashed/missing offscreen document never hangs STOP_RECORDING forever
         let folderName = '';
         try {
-          const offscreenRes = await chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN_RECORDING' });
+          const offscreenRes = await Promise.race([
+            chrome.runtime.sendMessage({ type: 'STOP_OFFSCREEN_RECORDING' }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Offscreen stop timed out after 15s')), 15000))
+          ]);
           if (offscreenRes && offscreenRes.folderName) {
             folderName = offscreenRes.folderName;
           }
@@ -223,8 +262,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
 
         let captionsData = { rawTranscript: '', utterances: [], participants: [] };
-        const [meetTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const targetTabId = (meetTab && meetTab.id) ? meetTab.id : (await chrome.storage.local.get('activeTabId')).activeTabId;
+
+        // IMPORTANT: Always use the stored activeTabId (saved when recording started).
+        // Do NOT use chrome.tabs.query({ active: true, currentWindow: true }) as the primary source —
+        // when the popup is open, that query returns the popup's window context, not the Meet tab.
+        const { activeTabId: storedTabId } = await chrome.storage.local.get('activeTabId');
+        let targetTabId = storedTabId;
+
+        // Fallback: if stored ID is missing, search all tabs for an active Google Meet tab
+        if (!targetTabId) {
+          const meetTabs = await chrome.tabs.query({ url: '*://meet.google.com/*' });
+          if (meetTabs.length > 0) {
+            targetTabId = meetTabs[0].id;
+            console.warn('[Background] activeTabId not in storage, falling back to Meet tab search:', targetTabId);
+          }
+        }
 
         if (targetTabId) {
           try {
@@ -235,6 +287,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           } catch (capErr) {
             console.warn('[Background] Could not retrieve captions from content script:', capErr.message);
           }
+        } else {
+          console.warn('[Background] Could not determine target Meet tab ID to retrieve captions.');
         }
 
         // Step 3: Send ground-truth captions to Express backend dynamically
@@ -266,7 +320,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           recordingState: 'complete',
           lastResults: structuredData,
           completedAt: new Date().toISOString(),
-          lastError: null
+          lastError: null,
+          activeTabId: null  // C3 fix: clear stored tab ID so a future recording on a different Meet tab starts fresh
         });
 
         await chrome.action.setBadgeText({ text: 'DONE' });
@@ -306,9 +361,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Setup default config on install
 chrome.runtime.onInstalled.addListener(async () => {
-  await chrome.storage.local.set({
-    recordingState: 'idle',
-    backendUrl: 'http://localhost:3001'
-  });
+  // N2 fix: only set backendUrl default if user hasn't already saved a custom one
+  const existing = await chrome.storage.local.get(['backendUrl', 'recordingState']);
+  const updates = { recordingState: 'idle' };
+  if (!existing.backendUrl) {
+    updates.backendUrl = 'http://localhost:3001';
+  }
+  await chrome.storage.local.set(updates);
   await chrome.action.setBadgeText({ text: '' });
 });

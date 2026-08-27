@@ -1,3 +1,4 @@
+require('dotenv').config(); // C8 fix: load .env before anything else so GEMINI_API_KEY / GROQ_API_KEY are available locally
 const os = require('os');
 const express = require('express');
 const cors = require('cors');
@@ -24,12 +25,15 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 const isVercel = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const TEMP_DIR = isVercel ? path.join(os.tmpdir(), 'temp_recordings') : path.join(__dirname, 'temp_recordings');
 
-try {
-  if (!fs.existsSync(TEMP_DIR)) {
-    fs.mkdirSync(TEMP_DIR, { recursive: true });
+// N4: Only create temp dir when running locally — on Vercel the filesystem is ephemeral
+if (!isVercel) {
+  try {
+    if (!fs.existsSync(TEMP_DIR)) {
+      fs.mkdirSync(TEMP_DIR, { recursive: true });
+    }
+  } catch (dirErr) {
+    console.warn('[MeetScribe] Note on temp directory:', dirErr.message);
   }
-} catch (dirErr) {
-  console.warn('[MeetScribe] Note on temp directory:', dirErr.message);
 }
 
 // Configure Multer storage
@@ -93,12 +97,11 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
   const userConfiguredModel = process.env.GEMINI_MODEL;
   const modelCandidates = [
     ...(userConfiguredModel ? [userConfiguredModel] : []),
-    'gemini-3.5-flash',
-    'gemini-flash-latest',
-    'gemini-3.6-flash',
-    'gemini-3.7-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-pro-latest'
+    'gemini-2.5-flash-preview-05-20',  // Latest stable preview
+    'gemini-3.6-flash',                // Recommended replacement for 2.5-flash
+    'gemini-3.5-flash-lite',           // Recommended replacement for 2.5-flash-lite
+    'gemini-2.5-flash-preview-04-17',  // Older preview fallback
+    'gemini-2.5-pro-preview-05-06',    // Pro fallback
   ];
 
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
@@ -188,7 +191,7 @@ OUTPUT JSON SCHEMA:
 }
 
 /**
- * Fallback: Process Captions with Groq LLM (llama-3.3-70b-versatile or mixtral)
+ * Fallback: Process Captions with Groq LLM (tries multiple models in order)
  */
 async function processCaptionsWithGroq(rawTranscript, participants = [], clientGroqKey) {
   const activeGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
@@ -197,28 +200,48 @@ async function processCaptionsWithGroq(rawTranscript, participants = [], clientG
   }
 
   const groq = new Groq({ apiKey: activeGroqKey });
-  console.log('[Backend Groq LLM] Structuring captions with Groq...');
 
-  const completion = await groq.chat.completions.create({
-    messages: [
-      {
-        role: 'system',
-        content: `You are a bilingual Urdu/English meeting notes assistant.
+  // Try multiple Groq models in order — free tier may not have access to all
+  const groqModelCandidates = [
+    'llama-3.3-70b-versatile',
+    'llama3-70b-8192',
+    'llama-3.1-70b-versatile',
+    'mixtral-8x7b-32768',
+    'llama3-8b-8192'
+  ];
+
+  const messages = [
+    {
+      role: 'system',
+      content: `You are a bilingual Urdu/English meeting notes assistant.
 Return ONLY valid JSON with keys: "transcript_urdu", "transcript_english", "action_items_urdu", "action_items_english_improved".
 Preserve exact speaker names. Spoken language is Urdu/English, NOT Arabic.`
-      },
-      {
-        role: 'user',
-        content: `Format these Google Meet captions into bilingual transcripts and action items:\n\n${rawTranscript}`
-      }
-    ],
-    model: 'llama-3.3-70b-versatile',
-    temperature: 0.1,
-    response_format: { type: 'json_object' }
-  });
+    },
+    {
+      role: 'user',
+      content: `Format these Google Meet captions into bilingual transcripts and action items:\n\n${rawTranscript}`
+    }
+  ];
 
-  const content = completion.choices[0]?.message?.content || '{}';
-  return JSON.parse(content);
+  let lastGroqErr = null;
+  for (const model of groqModelCandidates) {
+    try {
+      console.log(`[Backend Groq LLM] Trying model: ${model}...`);
+      const completion = await groq.chat.completions.create({
+        messages,
+        model,
+        temperature: 0.1,
+        response_format: { type: 'json_object' }
+      });
+      const content = completion.choices[0]?.message?.content || '{}';
+      return JSON.parse(content);
+    } catch (groqModelErr) {
+      console.warn(`[Backend Groq LLM] Error with ${model}:`, groqModelErr.message);
+      lastGroqErr = groqModelErr;
+    }
+  }
+
+  throw lastGroqErr || new Error('All Groq models failed.');
 }
 
 /**
@@ -276,9 +299,13 @@ app.post(['/api/process-captions', '/process-captions'], async (req, res) => {
 
   } catch (err) {
     console.error('[MeetScribe] Captions Pipeline Error:', err);
+    // Always return 500 for server-side AI errors (avoid leaking upstream HTTP codes like 400/404)
+    const safeMsg = (err.message || 'An error occurred while processing meeting captions.')
+      .replace(/https?:\/\/\S+/g, '[API endpoint]') // strip internal URLs from user-facing errors
+      .slice(0, 300);
     return res.status(500).json({
       success: false,
-      error: err.message || 'An error occurred while processing meeting captions.'
+      error: safeMsg
     });
   }
 });
@@ -287,9 +314,27 @@ app.post(['/api/process-captions', '/process-captions'], async (req, res) => {
  * Secondary / Legacy Endpoint: Multi-part Audio Upload (Retained for backwards compatibility)
  */
 app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), async (req, res) => {
-  // If captions were supplied in body instead of audio file
+  // M8: If captions text was posted here instead of audio, handle it inline (removed broken app._router.handle hack)
   if (req.body?.transcript || req.body?.utterances) {
-    return app._router.handle(req, res);
+    const { transcript, utterances, participants = [], geminiApiKey, groqApiKey } = req.body || {};
+    const clientGeminiKey = req.headers['x-gemini-api-key'] || geminiApiKey;
+    const clientGroqKey = req.headers['x-groq-api-key'] || groqApiKey;
+    let formattedTranscript = typeof transcript === 'string' && transcript.trim()
+      ? transcript.trim()
+      : Array.isArray(utterances)
+        ? utterances.map(u => `[${u.speaker || 'Participant'}]: ${u.text || ''}`).join('\n')
+        : '';
+    try {
+      let out = null;
+      try { out = await processCaptionsWithGemini(formattedTranscript, participants, clientGeminiKey); }
+      catch (e) {
+        if (clientGroqKey || process.env.GROQ_API_KEY) out = await processCaptionsWithGroq(formattedTranscript, participants, clientGroqKey);
+        else throw e;
+      }
+      return res.status(200).json({ success: true, data: out });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
   }
 
   const uploadedFile = req.file;
