@@ -291,58 +291,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           console.warn('[Background] Could not determine target Meet tab ID to retrieve captions.');
         }
 
-        // Step 3: Process meeting content (Captions if available, Audio AI fallback if captions are empty)
+        // Step 3: Transcribe and Structure Meeting with High-Definition Audio AI Engine
+        await chrome.storage.local.set({
+          processingStep: 'Transcribing audio and attributing speakers with AI...'
+        });
+
         const storageData = await chrome.storage.local.get(['geminiApiKey', 'groqApiKey', 'backendUrl']);
         const geminiApiKey = storageData.geminiApiKey || '';
         const groqApiKey = storageData.groqApiKey || '';
         const activeUrl = storageData.backendUrl || 'http://localhost:3001';
 
         let structuredData = null;
+        const participants = captionsData.participants || [];
 
-        if (captionsData && captionsData.rawTranscript && captionsData.rawTranscript.trim().length > 10) {
-          await chrome.storage.local.set({
-            processingStep: 'Structuring bilingual Urdu/English notes with Gemini...'
+        try {
+          console.log(`[Background] Processing audio recording with attendees: ${participants.join(', ') || 'Call Participants'}`);
+          const audioRes = await chrome.runtime.sendMessage({
+            type: 'PROCESS_AUDIO_FALLBACK',
+            backendUrl: activeUrl,
+            geminiApiKey: geminiApiKey,
+            groqApiKey: groqApiKey,
+            participants: participants
           });
-          console.log('[Background] Using live speaker captions for AI notes...');
+
+          if (audioRes && audioRes.success && audioRes.data) {
+            structuredData = audioRes.data;
+            console.log('[Background] Audio AI processing successful ✓');
+          } else {
+            throw new Error((audioRes && audioRes.error) || 'Audio AI returned no data');
+          }
+        } catch (audioErr) {
+          console.warn('[Background] Primary audio AI processing failed, attempting captions fallback:', audioErr.message);
           structuredData = await postCaptionsToBackend({
             transcript: captionsData.rawTranscript || '',
             utterances: captionsData.utterances || [],
-            participants: captionsData.participants || [],
+            participants: participants,
             geminiApiKey: geminiApiKey,
             groqApiKey: groqApiKey
           });
-        } else {
-          // No live captions captured — automatically transcribe crystal-clear audio recording with AI!
-          await chrome.storage.local.set({
-            processingStep: 'Transcribing meeting audio recording with AI...'
-          });
-          console.log('[Background] No captions in DOM, activating Audio AI transcription fallback...');
-
-          try {
-            const audioFallbackRes = await chrome.runtime.sendMessage({
-              type: 'PROCESS_AUDIO_FALLBACK',
-              backendUrl: activeUrl,
-              geminiApiKey: geminiApiKey,
-              groqApiKey: groqApiKey,
-              participants: captionsData.participants || []
-            });
-
-            if (audioFallbackRes && audioFallbackRes.success && audioFallbackRes.data) {
-              structuredData = audioFallbackRes.data;
-              console.log('[Background] Audio AI fallback transcription successful ✓');
-            } else {
-              throw new Error((audioFallbackRes && audioFallbackRes.error) || 'Audio AI fallback returned no data');
-            }
-          } catch (audioErr) {
-            console.warn('[Background] Audio AI fallback failed, posting captions payload as last resort:', audioErr.message);
-            structuredData = await postCaptionsToBackend({
-              transcript: captionsData.rawTranscript || '',
-              utterances: captionsData.utterances || [],
-              participants: captionsData.participants || [],
-              geminiApiKey: geminiApiKey,
-              groqApiKey: groqApiKey
-            });
-          }
         }
 
         // Step 4: Download the 4 UTF-8 text files to the same meeting folder

@@ -388,28 +388,38 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
     // Strategy 2: Google Gemini Direct Audio Understanding
     const effectiveGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
     if (!rawText && effectiveGeminiKey && effectiveGeminiKey !== 'your_gemini_api_key_here') {
-      try {
-        console.log('[MeetScribe Audio] Transcribing with Google Gemini Audio...');
-        const genAI = new GoogleGenerativeAI(effectiveGeminiKey);
-        const fileBuffer = fs.readFileSync(filePath);
-        const base64Audio = fileBuffer.toString('base64');
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-        const result = await model.generateContent([
-          `Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English conversation verbatim into clean dialogue with speaker attribution.
+      const genAI = new GoogleGenerativeAI(effectiveGeminiKey);
+      const fileBuffer = fs.readFileSync(filePath);
+      const base64Audio = fileBuffer.toString('base64');
+      const audioModelCandidates = [
+        'gemini-2.5-flash-preview-05-20',
+        'gemini-3.6-flash',
+        'gemini-1.5-flash',
+        'gemini-2.5-pro-preview-05-06'
+      ];
+
+      for (const modelName of audioModelCandidates) {
+        try {
+          console.log(`[MeetScribe Audio] Transcribing with Google Gemini Audio (${modelName})...`);
+          const model = genAI.getGenerativeModel({ model: modelName });
+          const result = await model.generateContent([
+            `Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English conversation verbatim into clean dialogue with speaker attribution.
 Known meeting participants: ${participantsList.join(', ') || 'Attendees'}.
 Format each utterance as:
 [Speaker Name]: [Spoken dialogue]`,
-          {
-            inlineData: {
-              mimeType: 'audio/webm',
-              data: base64Audio
+            {
+              inlineData: {
+                mimeType: 'audio/webm',
+                data: base64Audio
+              }
             }
-          }
-        ]);
-        const response = await result.response;
-        rawText = response.text() ? response.text().trim() : '';
-      } catch (geminiAudioErr) {
-        console.warn('[MeetScribe Audio] Gemini Audio transcription error:', geminiAudioErr.message);
+          ]);
+          const response = await result.response;
+          rawText = response.text() ? response.text().trim() : '';
+          if (rawText) break;
+        } catch (geminiAudioErr) {
+          console.warn(`[MeetScribe Audio] Gemini Audio (${modelName}) error:`, geminiAudioErr.message);
+        }
       }
     }
 

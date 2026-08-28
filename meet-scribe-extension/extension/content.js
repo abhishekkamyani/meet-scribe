@@ -1,22 +1,16 @@
 /**
  * MeetScribe Urdu - Google Meet Content Script
  * 1. Monitors Google Meet microphone mute/unmute state in real-time.
- * 2. Scrapes 100% ground-truth real-time speaker-attributed captions from Google Meet DOM (passive).
- * 3. Extracts verified meeting participants roster.
+ * 2. Passively discovers authenticated meeting participant roster without touching the UI.
+ * 3. Zero visual interference: No captions toggled, no overlays, no layout modifications.
  */
 
 let lastMuteState = null;
 let debounceTimeout = null;
 let pollInterval = null;
 let domObserver = null;
-let captionsObserver = null;
-let isCapturingCaptions = false;
-
-// Captions Storage: Array of { speaker: string, text: string, timestamp: string }
-let captionsHistory = [];
-let lastRecordedSpeaker = '';
-let lastRecordedText = '';
-const uniqueSpeakersSet = new Set();
+let discoveredSelfName = '';
+const discoveredParticipantsSet = new Set();
 
 // Helper: Safely verify if extension context is valid
 function isContextValid() {
@@ -47,10 +41,6 @@ function cleanUpScript() {
     try { domObserver.disconnect(); } catch (e) {}
     domObserver = null;
   }
-  if (captionsObserver) {
-    try { captionsObserver.disconnect(); } catch (e) {}
-    captionsObserver = null;
-  }
   if (pollInterval) {
     clearInterval(pollInterval);
     pollInterval = null;
@@ -59,404 +49,18 @@ function cleanUpScript() {
     clearTimeout(debounceTimeout);
     debounceTimeout = null;
   }
-  removeCaptionsOverlayStyle();
+  removeLegacyStyles();
 }
 
 /**
- * Prevents Google Meet from shrinking the presentation/video grid when captions are active.
+ * Clean up any injected legacy styles
  */
-function injectCaptionsOverlayStyle() {
-  if (document.getElementById('meetscribe-captions-overlay-style')) return;
-  const style = document.createElement('style');
-  style.id = 'meetscribe-captions-overlay-style';
-  style.textContent = `
-    /* MeetScribe: Keep video grid / presentation 100% full-size by floating captions over the bottom */
-    div[jsname="YSxPtf"],
-    div[jsname="tgaKEf"],
-    div.a4cQT,
-    [role="region"][aria-label*="caption" i],
-    [role="region"][aria-label*="subtitle" i] {
-      position: absolute !important;
-      bottom: 80px !important;
-      left: 50% !important;
-      transform: translateX(-50%) !important;
-      max-width: 85% !important;
-      height: auto !important;
-      max-height: 120px !important;
-      z-index: 10 !important;
-      pointer-events: none !important;
-    }
-  `;
-  document.head.appendChild(style);
-}
-
-function removeCaptionsOverlayStyle() {
-  const style = document.getElementById('meetscribe-captions-overlay-style');
-  if (style) style.remove();
-  const hideStyle = document.getElementById('meetscribe-hide-captions-style');
-  if (hideStyle) hideStyle.remove();
-  document.body.classList.remove('meetscribe-hide-captions');
-  const legacyStyle = document.getElementById('meetscribe-stealth-style');
-  if (legacyStyle) legacyStyle.remove();
-  document.body.classList.remove('meetscribe-stealth-active');
-}
-
-/**
- * Accurately find the Google Meet Closed Captions (CC) toggle button in the bottom toolbar.
- * Strictly ignores settings, language, or menu buttons to prevent any dialog opening.
- */
-function findCcToggleButton() {
-  const allButtons = document.querySelectorAll('button, div[role="button"]');
-
-  // Exact jsname match for the main CC toolbar button
-  for (const btn of allButtons) {
-    if (btn.closest('[role="dialog"]')) continue;
-    if (btn.getAttribute('jsname') === 'r8qRAd') {
-      const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-      const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-      if (
-        !label.includes('setting') && !tooltip.includes('setting') &&
-        !label.includes('language') && !tooltip.includes('language') &&
-        !label.includes('option') && !tooltip.includes('option')
-      ) {
-        return btn;
-      }
-    }
-  }
-
-  // Label match
-  for (const btn of allButtons) {
-    if (btn.closest('[role="dialog"]')) continue;
-    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-
-    if (
-      label.includes('setting') || tooltip.includes('setting') ||
-      label.includes('language') || tooltip.includes('language') ||
-      label.includes('more option') || tooltip.includes('more option') ||
-      label.includes('choose') || tooltip.includes('choose') ||
-      label.includes('menu') || tooltip.includes('menu')
-    ) {
-      continue;
-    }
-
-    const isCcToggle =
-      label.includes('turn on caption') || label.includes('turn off caption') ||
-      label.includes('turn on subtitle') || label.includes('turn off subtitle') ||
-      tooltip.includes('turn on caption') || tooltip.includes('turn off caption') ||
-      tooltip.includes('turn on subtitle') || tooltip.includes('turn off subtitle') ||
-      label.includes('کیپشن آن') || label.includes('کیپشن بند') ||
-      label.includes('سب ٹائٹل آن') || label.includes('سب ٹائٹل بند') ||
-      ((label.includes('caption') || tooltip.includes('caption')) && (label.includes('(c)') || tooltip.includes('(c)')));
-
-    if (isCcToggle) {
-      return btn;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Enable Google Meet Closed Captions once on start so speaker names are captured in real-time
- */
-function ensureCaptionsEnabledOnce() {
-  try {
-    const ccBtn = findCcToggleButton();
-    if (ccBtn) {
-      const isPressed = ccBtn.getAttribute('aria-pressed') === 'true';
-      const label = (ccBtn.getAttribute('aria-label') || '').toLowerCase();
-      const tooltip = (ccBtn.getAttribute('data-tooltip') || '').toLowerCase();
-      const isOn = isPressed || label.includes('turn off') || tooltip.includes('turn off') || label.includes('کیپشن بند');
-
-      if (!isOn) {
-        console.log('[MeetScribe] Auto-enabling Google Meet CC for live speaker tagging...');
-        ccBtn.click();
-      }
-    }
-  } catch (err) {
-    console.warn('[MeetScribe] Non-fatal error ensuring CC on start:', err);
-  }
-}
-
-/**
- * Check if Google Meet Closed Captions are currently active in DOM
- */
-function isMeetCaptionsActive() {
-  const captionDom = document.querySelector([
-    'div[jsname="YSxPtf"]',
-    'div[jsname="tgaKEf"]',
-    'div.iTTPOb',
-    'div.nMx0df',
-    '[role="region"][aria-label*="caption" i]',
-    '[role="region"][aria-label*="subtitle" i]'
-  ].join(', '));
-
-  return Boolean(captionDom && (captionDom.children.length > 0 || (captionDom.innerText || '').trim().length > 0));
-}
-
-/**
- * Real-time Closed Captions Scraper & Accumulator
- * Uses a multi-layer detection strategy to survive Google Meet DOM changes:
- * Layer 1: Known jsname/class selectors for caption containers
- * Layer 2: Semantic ARIA attributes (stable across Meet versions)
- * Layer 3: Broad aria-live sweep in lower screen
- */
-function findCaptionContainer() {
-  // Layer 1: Known selectors for captions container
-  const knownSelectors = [
-    'div[jsname="YSxPtf"]',
-    'div[jsname="tgaKEf"]',
-    'div.bh44bd',
-    'div.a4cQT',
-  ];
-  for (const sel of knownSelectors) {
-    const el = document.querySelector(sel);
-    if (el) return el;
-  }
-
-  // Layer 2: Semantic ARIA — stable across Meet UI updates
-  const ariaSelectors = [
-    '[role="region"][aria-label*="caption" i]',
-    '[role="region"][aria-label*="subtitle" i]',
-    '[role="region"][aria-label*="کیپشن" i]',
-    '[aria-live="polite"][aria-atomic="false"]',
-  ];
-  for (const sel of ariaSelectors) {
-    const el = document.querySelector(sel);
-    if (el && (el.innerText || '').trim().length > 1) return el;
-  }
-
-  // Layer 3: Any aria-live region in the lower half of the screen with text
-  const liveRegions = document.querySelectorAll('[aria-live]');
-  for (const el of liveRegions) {
-    const text = (el.innerText || '').trim();
-    if (text.length < 2) continue;
-    const rect = el.getBoundingClientRect();
-    // Captions appear in lower 50% of screen
-    if (rect.top > window.innerHeight * 0.4 || rect.bottom > window.innerHeight * 0.5) {
-      return el;
-    }
-  }
-
-  return null;
-}
-
-function processCaptionsDOM() {
-  try {
-    const container = findCaptionContainer();
-    if (!container) return;
-
-    // Get individual caption blocks (speaker + text pairs)
-    // Try specific child selectors first, fall back to container itself
-    const childSelectors = [
-      'div[jsname="YSxPtf"] > div',
-      'div[jsname="tgaKEf"] > div',
-      'div.bh44bd > div',
-      'div.iTTPOb',
-      'div.nMx0df',
-      '[role="region"][aria-label*="caption" i] > div',
-      '[aria-live][aria-atomic="false"] > div',
-    ];
-
-    let captionBlocks = document.querySelectorAll(childSelectors.join(', '));
-
-    // If no child blocks, treat the container itself as the single block
-    if (captionBlocks.length === 0) {
-      captionBlocks = [container];
-    }
-
-    captionBlocks.forEach(block => {
-      // 1. Extract Speaker Name
-      let speakerName = '';
-
-      const speakerEl = block.querySelector('.zs75Ib, .NW0r5c, .jxFHg, span.notranslate, div.notranslate, [data-self-name]');
-      if (speakerEl) {
-        speakerName = (speakerEl.innerText || speakerEl.getAttribute('data-self-name') || '').trim();
-      }
-
-      if (!speakerName) {
-        const imgEl = block.querySelector('img[alt]');
-        if (imgEl && imgEl.getAttribute('alt')) {
-          const alt = imgEl.getAttribute('alt').trim();
-          if (alt && !['avatar', 'profile', 'photo'].includes(alt.toLowerCase())) {
-            speakerName = alt;
-          }
-        }
-      }
-
-      if (!speakerName) {
-        const parent = block.closest('div[jsname="YSxPtf"], div[jsname="tgaKEf"], div.bh44bd, [role="region"]');
-        if (parent) {
-          const prevHeader = parent.querySelector('.zs75Ib, .NW0r5c, .jxFHg');
-          if (prevHeader) speakerName = prevHeader.innerText.trim();
-        }
-      }
-
-      speakerName = speakerName
-        .replace(/\s*\((?:You|آپ|Presentation|Host|Meeting host|Guest)\)/ig, '')
-        .split('\n')[0]
-        .trim();
-
-      if (!speakerName && discoveredSelfName) {
-        speakerName = discoveredSelfName;
-      } else if (!speakerName && lastRecordedSpeaker) {
-        speakerName = lastRecordedSpeaker;
-      } else if (!speakerName) {
-        speakerName = 'Participant';
-      }
-
-      // 2. Extract Spoken Text
-      const textEls = block.querySelectorAll('span.VbkSUe, span.iTTPOb, .yg3Swb, span[jsname="VbkSUe"]');
-      let textContent = '';
-
-      if (textEls.length > 0) {
-        textContent = Array.from(textEls).map(el => el.innerText || '').join(' ').trim();
-      }
-
-      // Fallback: clone block, strip speaker element, get all innerText
-      if (!textContent) {
-        const clone = block.cloneNode(true);
-        const rmSpeaker = clone.querySelector('.zs75Ib, .NW0r5c, .jxFHg, img');
-        if (rmSpeaker) rmSpeaker.remove();
-        textContent = (clone.innerText || '').trim();
-      }
-
-      // Last resort: use the raw innerText from the block as-is
-      if (!textContent) {
-        textContent = (block.innerText || '').trim();
-      }
-
-      if (!textContent || textContent.length < 1) return;
-
-      uniqueSpeakersSet.add(speakerName);
-
-      const now = new Date();
-      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-
-      // 3. Deduplicate and merge streaming text
-      if (captionsHistory.length > 0) {
-        const lastEntry = captionsHistory[captionsHistory.length - 1];
-
-        if (lastEntry.speaker === speakerName) {
-          if (textContent.startsWith(lastEntry.text) || lastEntry.text.startsWith(textContent)) {
-            if (textContent.length > lastEntry.text.length) {
-              lastEntry.text = textContent;
-              lastEntry.timestamp = timeStr;
-            }
-            return;
-          }
-
-          if (!lastEntry.text.endsWith(textContent) && !textContent.includes(lastEntry.text)) {
-            lastEntry.text = `${lastEntry.text} ${textContent}`.replace(/\s+/g, ' ').trim();
-            lastEntry.timestamp = timeStr;
-            return;
-          }
-        }
-      }
-
-      // New distinct utterance block
-      if (lastRecordedText !== textContent || lastRecordedSpeaker !== speakerName) {
-        lastRecordedSpeaker = speakerName;
-        lastRecordedText = textContent;
-
-        captionsHistory.push({
-          speaker: speakerName,
-          text: textContent,
-          timestamp: timeStr
-        });
-
-        console.log(`[MeetScribe Captions] [${timeStr}] [${speakerName}]: ${textContent}`);
-      }
-    });
-
-  } catch (err) {
-    console.warn('[MeetScribe] Error processing captions DOM:', err);
-  }
-}
-
-/**
- * Start observing the captions container in Google Meet DOM
- */
-function startCaptionsObserver() {
-  if (captionsObserver) {
-    try { captionsObserver.disconnect(); } catch (e) {}
-    captionsObserver = null;
-  }
-
-  isCapturingCaptions = true;
-  injectCaptionsOverlayStyle();
-  ensureCaptionsEnabledOnce();
-
-  captionsObserver = new MutationObserver(() => {
-    if (isCapturingCaptions) {
-      processCaptionsDOM();
-    }
+function removeLegacyStyles() {
+  ['meetscribe-captions-overlay-style', 'meetscribe-hide-captions-style', 'meetscribe-stealth-style'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.remove();
   });
-
-  captionsObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-    characterData: true
-  });
-
-  console.log('[MeetScribe Content] Real-time Captions Observer active.');
-}
-
-/**
- * Stop observing captions and return accumulated transcript
- */
-function stopCaptionsObserver() {
-  isCapturingCaptions = false;
-  if (captionsObserver) {
-    try { captionsObserver.disconnect(); } catch (e) {}
-    captionsObserver = null;
-  }
-  removeCaptionsOverlayStyle();
-
-  processCaptionsDOM();
-  return getFormattedCaptions();
-}
-
-/**
- * Format accumulated captions into a clean dialogue transcript
- */
-function getFormattedCaptions() {
-  const mergedUtterances = [];
-
-  for (const entry of captionsHistory) {
-    if (!entry.text || entry.text.trim().length === 0) continue;
-
-    if (mergedUtterances.length > 0) {
-      const prev = mergedUtterances[mergedUtterances.length - 1];
-      if (prev.speaker === entry.speaker) {
-        prev.text = `${prev.text} ${entry.text}`.replace(/\s+/g, ' ').trim();
-        prev.timestamp = entry.timestamp;
-        continue;
-      }
-    }
-
-    mergedUtterances.push({
-      speaker: entry.speaker,
-      text: entry.text.trim(),
-      timestamp: entry.timestamp
-    });
-  }
-
-  const rawTranscript = mergedUtterances
-    .map(u => `[${u.speaker}]: ${u.text}`)
-    .join('\n');
-
-  const participants = Array.from(new Set([
-    ...Array.from(uniqueSpeakersSet),
-    ...extractParticipantNames().allParticipants
-  ])).filter(Boolean);
-
-  return {
-    rawTranscript: rawTranscript,
-    utterances: mergedUtterances,
-    participants: participants
-  };
+  document.body.classList.remove('meetscribe-hide-captions', 'meetscribe-stealth-active');
 }
 
 /**
@@ -561,11 +165,10 @@ function triggerStateCheck() {
   }, 30);
 }
 
-// Persistent participant discovery state
-let discoveredSelfName = '';
-const discoveredRemoteParticipants = new Set();
-
-// Extract active participant names from Google Meet DOM
+/**
+ * Comprehensive Participant Discovery:
+ * Scans Google Meet participant tiles, sidebars, and aria tags to identify all attendees.
+ */
 function extractParticipantNames() {
   let selfName = '';
   const roomParticipants = new Set();
@@ -602,7 +205,8 @@ function extractParticipantNames() {
     'turn on microphone', 'turn off microphone', 'turn on camera', 'turn off camera',
     'raise hand', 'more options', 'leave call', 'info', 'show everyone', 'participants',
     'send a message to everyone', 'call details', 'pin', 'mute', 'unmute', 'grid view',
-    'speaker view', 'presentation', 'your presentation', 'gemini', 'meet', 'google meet'
+    'speaker view', 'presentation', 'your presentation', 'gemini', 'meet', 'google meet',
+    'third', 'second', 'first', 'okay', 'yes', 'no'
   ]);
 
   const participantSelectors = [
@@ -613,13 +217,18 @@ function extractParticipantNames() {
     'div[data-participant-name]',
     'div[role="listitem"] span[title]',
     'div[role="listitem"] [data-participant-id]',
+    'span.XE8e1d',
+    'div.XE8e1d',
+    'span.notranslate',
+    'div.notranslate',
+    'div[data-call-participant-id]',
     'span[jsname="WQtWae"]',
     'div[jsname="xySENc"]'
   ];
 
   const candidateElements = document.querySelectorAll(participantSelectors.join(', '));
   candidateElements.forEach(el => {
-    let title = (el.getAttribute('title') || el.getAttribute('data-participant-name') || el.innerText || '').split('\n')[0].trim();
+    let title = (el.getAttribute('title') || el.getAttribute('data-participant-name') || el.getAttribute('aria-label') || el.innerText || '').split('\n')[0].trim();
     title = title.replace(/\s*\((?:You|آپ|Presentation|Host|Meeting host|Guest|External)\)/ig, '').trim();
 
     if (
@@ -628,14 +237,15 @@ function extractParticipantNames() {
       title.length <= 40 &&
       !title.includes('http') &&
       !title.includes(':') &&
+      !title.includes('(') &&
       !ignoredLabels.has(title.toLowerCase())
     ) {
       roomParticipants.add(title);
-      discoveredRemoteParticipants.add(title);
+      discoveredParticipantsSet.add(title);
     }
   });
 
-  const allFoundNames = Array.from(roomParticipants);
+  const allFoundNames = Array.from(new Set([...Array.from(discoveredParticipantsSet), ...Array.from(roomParticipants)]));
   let remoteArray = allFoundNames.filter(n => n !== selfName);
 
   if (!selfName && allFoundNames.length >= 2) {
@@ -657,6 +267,7 @@ function extractParticipantNames() {
 // Initialize MutationObserver
 function initObserver() {
   if (!isContextValid()) return;
+  removeLegacyStyles();
 
   domObserver = new MutationObserver(() => {
     triggerStateCheck();
@@ -665,7 +276,7 @@ function initObserver() {
 
   domObserver.observe(document.body, {
     attributes: true,
-    attributeFilter: ['data-is-muted', 'aria-label', 'data-tooltip', 'class', 'title', 'data-participant-id', 'style'],
+    attributeFilter: ['data-is-muted', 'aria-label', 'data-tooltip', 'class', 'title', 'data-participant-id'],
     subtree: true,
     childList: true
   });
@@ -678,8 +289,6 @@ function initObserver() {
 
   window.addEventListener('click', (e) => {
     setTimeout(triggerStateCheck, 20);
-    // Note: we intentionally do NOT call maintainCaptionsKeepAlive on every click,
-    // as that caused the settings modal to reopen whenever the user closed it.
   });
 
   pollInterval = setInterval(() => {
@@ -689,23 +298,15 @@ function initObserver() {
     }
     triggerStateCheck();
     extractParticipantNames();
-  }, 200);
+  }, 300);
 
   notifyMicStateChange();
   extractParticipantNames();
 }
 
-
-// Re-injection guard: background.js may inject this script programmatically to ensure the
-// latest version is running on existing Meet tabs (tabs opened before the extension was loaded/reloaded).
-// This block prevents double message listeners, double observers, and double poll intervals.
+// Re-injection guard
 if (window.__meetScribeContentLoaded) {
-  console.log('[MeetScribe] Re-injected into already-active tab \u2014 cleaning up previous instance and reinitializing...');
   cleanUpScript();
-  isCapturingCaptions = false;
-  captionsHistory = [];
-  lastRecordedSpeaker = '';
-  lastRecordedText = '';
 }
 window.__meetScribeContentLoaded = true;
 
@@ -714,17 +315,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!isContextValid()) return false;
 
   if (message.type === 'START_CAPTIONS_CAPTURE') {
-    captionsHistory = [];
-    uniqueSpeakersSet.clear();
-    lastRecordedSpeaker = '';
-    lastRecordedText = '';
-    startCaptionsObserver();
+    discoveredParticipantsSet.clear();
+    extractParticipantNames();
     sendResponse({ success: true });
     return true;
 
   } else if (message.type === 'STOP_CAPTIONS_CAPTURE' || message.type === 'GET_CAPTIONS_TRANSCRIPT') {
-    const data = stopCaptionsObserver();
-    sendResponse({ success: true, ...data });
+    const participantsData = extractParticipantNames();
+    sendResponse({
+      success: true,
+      rawTranscript: '',
+      utterances: [],
+      participants: participantsData.allParticipants
+    });
     return true;
 
   } else if (message.type === 'GET_MEET_MIC_STATUS') {
@@ -746,4 +349,3 @@ if (document.readyState === 'loading') {
 } else {
   initObserver();
 }
-
