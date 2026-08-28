@@ -323,7 +323,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               type: 'PROCESS_AUDIO_FALLBACK',
               backendUrl: activeUrl,
               geminiApiKey: geminiApiKey,
-              groqApiKey: groqApiKey
+              groqApiKey: groqApiKey,
+              participants: captionsData.participants || []
             });
 
             if (audioFallbackRes && audioFallbackRes.success && audioFallbackRes.data) {

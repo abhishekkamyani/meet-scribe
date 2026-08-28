@@ -284,7 +284,7 @@ async function stopRecording() {
 }
 
 // Fallback: Transcribe audio with AI backend when live captions were not available in Google Meet
-async function processAudioFallback(backendUrl, geminiApiKey, groqApiKey) {
+async function processAudioFallback(backendUrl, geminiApiKey, groqApiKey, participants = []) {
   if (!lastCompiledAudioBlob || lastCompiledAudioBlob.size === 0) {
     throw new Error('No audio recording available for AI transcription.');
   }
@@ -293,6 +293,9 @@ async function processAudioFallback(backendUrl, geminiApiKey, groqApiKey) {
   formData.append('audio', lastCompiledAudioBlob, 'meeting_audio.webm');
   if (geminiApiKey) formData.append('geminiApiKey', geminiApiKey);
   if (groqApiKey) formData.append('groqApiKey', groqApiKey);
+  if (Array.isArray(participants) && participants.length > 0) {
+    formData.append('participants', JSON.stringify(participants));
+  }
 
   const cleanUrl = (backendUrl || 'http://localhost:3001').replace(/\/+$/, '');
   console.log(`[Offscreen Audio Fallback] Sending audio (${(lastCompiledAudioBlob.size / (1024 * 1024)).toFixed(2)} MB) to ${cleanUrl}/api/process-meeting...`);
@@ -350,7 +353,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
 
   } else if (message.type === 'PROCESS_AUDIO_FALLBACK') {
-    processAudioFallback(message.backendUrl, message.geminiApiKey, message.groqApiKey)
+    processAudioFallback(message.backendUrl, message.geminiApiKey, message.groqApiKey, message.participants || [])
       .then(res => sendResponse(res))
       .catch(err => {
         console.error('[Offscreen] Audio fallback error:', err);

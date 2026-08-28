@@ -102,6 +102,84 @@ function removeCaptionsOverlayStyle() {
 }
 
 /**
+ * Accurately find the Google Meet Closed Captions (CC) toggle button in the bottom toolbar.
+ * Strictly ignores settings, language, or menu buttons to prevent any dialog opening.
+ */
+function findCcToggleButton() {
+  const allButtons = document.querySelectorAll('button, div[role="button"]');
+
+  // Exact jsname match for the main CC toolbar button
+  for (const btn of allButtons) {
+    if (btn.closest('[role="dialog"]')) continue;
+    if (btn.getAttribute('jsname') === 'r8qRAd') {
+      const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+      if (
+        !label.includes('setting') && !tooltip.includes('setting') &&
+        !label.includes('language') && !tooltip.includes('language') &&
+        !label.includes('option') && !tooltip.includes('option')
+      ) {
+        return btn;
+      }
+    }
+  }
+
+  // Label match
+  for (const btn of allButtons) {
+    if (btn.closest('[role="dialog"]')) continue;
+    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+
+    if (
+      label.includes('setting') || tooltip.includes('setting') ||
+      label.includes('language') || tooltip.includes('language') ||
+      label.includes('more option') || tooltip.includes('more option') ||
+      label.includes('choose') || tooltip.includes('choose') ||
+      label.includes('menu') || tooltip.includes('menu')
+    ) {
+      continue;
+    }
+
+    const isCcToggle =
+      label.includes('turn on caption') || label.includes('turn off caption') ||
+      label.includes('turn on subtitle') || label.includes('turn off subtitle') ||
+      tooltip.includes('turn on caption') || tooltip.includes('turn off caption') ||
+      tooltip.includes('turn on subtitle') || tooltip.includes('turn off subtitle') ||
+      label.includes('کیپشن آن') || label.includes('کیپشن بند') ||
+      label.includes('سب ٹائٹل آن') || label.includes('سب ٹائٹل بند') ||
+      ((label.includes('caption') || tooltip.includes('caption')) && (label.includes('(c)') || tooltip.includes('(c)')));
+
+    if (isCcToggle) {
+      return btn;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Enable Google Meet Closed Captions once on start so speaker names are captured in real-time
+ */
+function ensureCaptionsEnabledOnce() {
+  try {
+    const ccBtn = findCcToggleButton();
+    if (ccBtn) {
+      const isPressed = ccBtn.getAttribute('aria-pressed') === 'true';
+      const label = (ccBtn.getAttribute('aria-label') || '').toLowerCase();
+      const tooltip = (ccBtn.getAttribute('data-tooltip') || '').toLowerCase();
+      const isOn = isPressed || label.includes('turn off') || tooltip.includes('turn off') || label.includes('کیپشن بند');
+
+      if (!isOn) {
+        console.log('[MeetScribe] Auto-enabling Google Meet CC for live speaker tagging...');
+        ccBtn.click();
+      }
+    }
+  } catch (err) {
+    console.warn('[MeetScribe] Non-fatal error ensuring CC on start:', err);
+  }
+}
+
+/**
  * Check if Google Meet Closed Captions are currently active in DOM
  */
 function isMeetCaptionsActive() {
@@ -308,6 +386,7 @@ function startCaptionsObserver() {
 
   isCapturingCaptions = true;
   injectCaptionsOverlayStyle();
+  ensureCaptionsEnabledOnce();
 
   captionsObserver = new MutationObserver(() => {
     if (isCapturingCaptions) {

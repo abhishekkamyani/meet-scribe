@@ -107,23 +107,26 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const participantsHint = participantsList.length > 0
     ? `AUTHENTIC GOOGLE MEET ATTENDEES IN THIS CALL:\n${participantsList.map(p => `- ${p}`).join('\n')}`
-    : `SPEAKER ATTRIBUTION: Preserve the exact speaker names provided in the caption stream.`;
+    : `AUTHENTIC GOOGLE MEET PARTICIPANTS: Identify distinct conversational speakers (e.g. Host, Team Member, Participant).`;
 
   const systemInstruction = `You are a world-class bilingual executive scribe and translator specializing in Urdu, English, and corporate conversations (Urdish).
 
-You are given the VERBATIM, 100% GROUND-TRUTH CLOSED CAPTIONS captured live from a Google Meet call. Every sentence has already been tagged with the authentic speaker name by Google Meet.
+You convert raw meeting conversations and captions into polished, highly accurate bilingual transcripts with complete speaker attribution.
 
 ${participantsHint}
 
 CRITICAL RULES:
-1. STRICT SPEAKER NAME PRESERVATION:
-   - ALWAYS preserve the exact speaker names attached to each line (e.g. "[Shoaib Shah]: ...", "[Abhishek Kamyani]: ...").
-   - NEVER invent, hallucinate, or replace real names with fictional names or generic tags like "[Host]", "[Speaker 1]", or "[Unknown]".
+1. STRICT SPEAKER NAME ATTRIBUTION (MANDATORY ON EVERY SINGLE LINE):
+   - EVERY SINGLE LINE in "transcript_urdu" and "transcript_english" MUST begin with "[Speaker Name]: " (e.g. "[Shoaib Shah]: ...", "[Abhishek Kamyani]: ...", "[Speaker 1]: ...").
+   - If speaker names are already tagged in the input (e.g. "[Shoaib Shah]: ..."), preserve those exact names faithfully.
+   - If the transcript is untagged dialogue, attribute speaker turns to the authentic participants in the call:
+${participantsList.length > 0 ? participantsList.map(p => `     - ${p}`).join('\n') : '     - Identify separate speakers (e.g. [Speaker 1], [Speaker 2], [Host]) based on dialogue turns.'}
+   - NEVER drop speaker names or output plain text paragraphs without "[Speaker]:" tags.
 
 2. AUTHENTIC URDU LANGUAGE (ABSOLUTELY NO ARABIC):
    - Spoken language is URDU (اردو) / URDISH and English.
    - NEVER output Arabic greetings like "مرحبا" or "بارک اللہ". Use standard Urdu ("السلام علیکم", "ہیلو", "جی ٹھیک ہے", "کیا حال ہے").
-   - Transcribe Urdu speech cleanly into Urdu script (نستعلیق / اردو رسم الخط). Keep technical loan words natural (e.g. "یو آئی", "بٹن", "اپ ڈیٹ", "اسکرین شیئر", "ٹیسٹ").
+   - Transcribe Urdu speech cleanly into Urdu script (نستعلیق / اردو رسم الخط). Keep technical loan words natural (e.g. "یو آئی", "بٹن", "اپ ڈیٹ", "اسکرین شیئر", "ٹیسٹ", "گٹ", "کمانڈ").
 
 3. DIALOGUE FORMAT (MANDATORY):
    - Urdu transcript (transcript_urdu):
@@ -143,8 +146,8 @@ CRITICAL RULES:
 
 OUTPUT JSON SCHEMA:
 {
-  "transcript_urdu": "Full speaker-wise dialogue in Urdu script.",
-  "transcript_english": "Full speaker-wise dialogue translation in English.",
+  "transcript_urdu": "Full speaker-wise dialogue in Urdu script with [Speaker Name]: on every line.",
+  "transcript_english": "Full speaker-wise dialogue translation in English with [Speaker Name]: on every line.",
   "action_items_urdu": "Bullet-pointed tasks with assigned person names in Urdu.",
   "action_items_english_improved": "Polished business English action items with assigned person names."
 }`;
@@ -347,6 +350,17 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
 
   const clientGroqKey = req.headers['x-groq-api-key'] || req.body?.groqApiKey;
   const clientGeminiKey = req.headers['x-gemini-api-key'] || req.body?.geminiApiKey;
+  let participants = [];
+  if (req.body?.participants) {
+    try {
+      participants = typeof req.body.participants === 'string'
+        ? JSON.parse(req.body.participants)
+        : req.body.participants;
+    } catch (e) {
+      participants = Array.isArray(req.body.participants) ? req.body.participants : [];
+    }
+  }
+  const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const filePath = uploadedFile.path;
 
   try {
@@ -363,7 +377,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
           model: 'whisper-large-v3',
           response_format: 'verbose_json',
           temperature: 0.0,
-          prompt: 'Urdu and English Google Meet conversation.'
+          prompt: `Meeting conversation between ${participantsList.join(', ') || 'participants'} in Urdu and English.`
         });
         rawText = transcription.text ? transcription.text.trim() : '';
       } catch (whisperErr) {
@@ -381,7 +395,10 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
         const base64Audio = fileBuffer.toString('base64');
         const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
         const result = await model.generateContent([
-          'Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English conversation verbatim, indicating speaker changes where clear.',
+          `Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English conversation verbatim into clean dialogue with speaker attribution.
+Known meeting participants: ${participantsList.join(', ') || 'Attendees'}.
+Format each utterance as:
+[Speaker Name]: [Spoken dialogue]`,
           {
             inlineData: {
               mimeType: 'audio/webm',
@@ -400,7 +417,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
       throw new Error('Could not transcribe audio. Please ensure either your Groq API Key or Gemini API Key is configured in settings.');
     }
 
-    const structuredOutput = await processCaptionsWithGemini(rawText, [], clientGeminiKey);
+    const structuredOutput = await processCaptionsWithGemini(rawText, participantsList, clientGeminiKey);
 
     return res.status(200).json({
       success: true,
