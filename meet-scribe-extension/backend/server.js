@@ -350,16 +350,56 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
   const filePath = uploadedFile.path;
 
   try {
-    const groq = new Groq({ apiKey: clientGroqKey || process.env.GROQ_API_KEY });
-    const transcription = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(filePath),
-      model: 'whisper-large-v3',
-      response_format: 'verbose_json',
-      temperature: 0.0,
-      prompt: 'Urdu and English Google Meet conversation.'
-    });
+    let rawText = '';
 
-    const rawText = transcription.text ? transcription.text.trim() : '';
+    // Strategy 1: Groq Whisper Large v3 (Fastest, ultra-accurate for bilingual Urdu/English)
+    const effectiveGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
+    if (effectiveGroqKey && effectiveGroqKey !== 'your_groq_api_key_here') {
+      try {
+        console.log('[MeetScribe Audio] Transcribing with Groq Whisper Large v3...');
+        const groq = new Groq({ apiKey: effectiveGroqKey });
+        const transcription = await groq.audio.transcriptions.create({
+          file: fs.createReadStream(filePath),
+          model: 'whisper-large-v3',
+          response_format: 'verbose_json',
+          temperature: 0.0,
+          prompt: 'Urdu and English Google Meet conversation.'
+        });
+        rawText = transcription.text ? transcription.text.trim() : '';
+      } catch (whisperErr) {
+        console.warn('[MeetScribe Audio] Groq Whisper error, attempting Gemini fallback:', whisperErr.message);
+      }
+    }
+
+    // Strategy 2: Google Gemini Direct Audio Understanding
+    const effectiveGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
+    if (!rawText && effectiveGeminiKey && effectiveGeminiKey !== 'your_gemini_api_key_here') {
+      try {
+        console.log('[MeetScribe Audio] Transcribing with Google Gemini Audio...');
+        const genAI = new GoogleGenerativeAI(effectiveGeminiKey);
+        const fileBuffer = fs.readFileSync(filePath);
+        const base64Audio = fileBuffer.toString('base64');
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const result = await model.generateContent([
+          'Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English conversation verbatim, indicating speaker changes where clear.',
+          {
+            inlineData: {
+              mimeType: 'audio/webm',
+              data: base64Audio
+            }
+          }
+        ]);
+        const response = await result.response;
+        rawText = response.text() ? response.text().trim() : '';
+      } catch (geminiAudioErr) {
+        console.warn('[MeetScribe Audio] Gemini Audio transcription error:', geminiAudioErr.message);
+      }
+    }
+
+    if (!rawText) {
+      throw new Error('Could not transcribe audio. Please ensure either your Groq API Key or Gemini API Key is configured in settings.');
+    }
+
     const structuredOutput = await processCaptionsWithGemini(rawText, [], clientGeminiKey);
 
     return res.status(200).json({

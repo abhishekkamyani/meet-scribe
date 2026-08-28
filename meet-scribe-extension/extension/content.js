@@ -59,17 +59,43 @@ function cleanUpScript() {
     clearTimeout(debounceTimeout);
     debounceTimeout = null;
   }
-  removeHideCaptionsStyle();
+  removeCaptionsOverlayStyle();
 }
 
 /**
- * Clean up any injected styles if present
+ * Prevents Google Meet from shrinking the presentation/video grid when captions are active.
  */
-function removeHideCaptionsStyle() {
-  const style = document.getElementById('meetscribe-hide-captions-style');
-  if (style) style.remove();
-  document.body.classList.remove('meetscribe-hide-captions');
+function injectCaptionsOverlayStyle() {
+  if (document.getElementById('meetscribe-captions-overlay-style')) return;
+  const style = document.createElement('style');
+  style.id = 'meetscribe-captions-overlay-style';
+  style.textContent = `
+    /* MeetScribe: Keep video grid / presentation 100% full-size by floating captions over the bottom */
+    div[jsname="YSxPtf"],
+    div[jsname="tgaKEf"],
+    div.a4cQT,
+    [role="region"][aria-label*="caption" i],
+    [role="region"][aria-label*="subtitle" i] {
+      position: absolute !important;
+      bottom: 80px !important;
+      left: 50% !important;
+      transform: translateX(-50%) !important;
+      max-width: 85% !important;
+      height: auto !important;
+      max-height: 120px !important;
+      z-index: 10 !important;
+      pointer-events: none !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
 
+function removeCaptionsOverlayStyle() {
+  const style = document.getElementById('meetscribe-captions-overlay-style');
+  if (style) style.remove();
+  const hideStyle = document.getElementById('meetscribe-hide-captions-style');
+  if (hideStyle) hideStyle.remove();
+  document.body.classList.remove('meetscribe-hide-captions');
   const legacyStyle = document.getElementById('meetscribe-stealth-style');
   if (legacyStyle) legacyStyle.remove();
   document.body.classList.remove('meetscribe-stealth-active');
@@ -272,7 +298,7 @@ function processCaptionsDOM() {
 }
 
 /**
- * Start observing the captions container in Google Meet DOM with Keep-Alive Guardian
+ * Start observing the captions container in Google Meet DOM
  */
 function startCaptionsObserver() {
   if (captionsObserver) {
@@ -281,7 +307,7 @@ function startCaptionsObserver() {
   }
 
   isCapturingCaptions = true;
-  removeHideCaptionsStyle();
+  injectCaptionsOverlayStyle();
 
   captionsObserver = new MutationObserver(() => {
     if (isCapturingCaptions) {
@@ -295,7 +321,7 @@ function startCaptionsObserver() {
     characterData: true
   });
 
-  console.log('[MeetScribe Content] Real-time Captions Observer active (passive mode).');
+  console.log('[MeetScribe Content] Real-time Captions Observer active.');
 }
 
 /**
@@ -307,7 +333,7 @@ function stopCaptionsObserver() {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
-  removeHideCaptionsStyle();
+  removeCaptionsOverlayStyle();
 
   processCaptionsDOM();
   return getFormattedCaptions();

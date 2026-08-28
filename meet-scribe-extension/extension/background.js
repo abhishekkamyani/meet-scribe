@@ -291,22 +291,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           console.warn('[Background] Could not determine target Meet tab ID to retrieve captions.');
         }
 
-        // Step 3: Send ground-truth captions to Express backend dynamically
-        await chrome.storage.local.set({
-          processingStep: 'Structuring bilingual Urdu/English notes with Gemini...'
-        });
-
-        const storageData = await chrome.storage.local.get(['geminiApiKey', 'groqApiKey']);
+        // Step 3: Process meeting content (Captions if available, Audio AI fallback if captions are empty)
+        const storageData = await chrome.storage.local.get(['geminiApiKey', 'groqApiKey', 'backendUrl']);
         const geminiApiKey = storageData.geminiApiKey || '';
         const groqApiKey = storageData.groqApiKey || '';
+        const activeUrl = storageData.backendUrl || 'http://localhost:3001';
 
-        const structuredData = await postCaptionsToBackend({
-          transcript: captionsData.rawTranscript || '',
-          utterances: captionsData.utterances || [],
-          participants: captionsData.participants || [],
-          geminiApiKey: geminiApiKey,
-          groqApiKey: groqApiKey
-        });
+        let structuredData = null;
+
+        if (captionsData && captionsData.rawTranscript && captionsData.rawTranscript.trim().length > 10) {
+          await chrome.storage.local.set({
+            processingStep: 'Structuring bilingual Urdu/English notes with Gemini...'
+          });
+          console.log('[Background] Using live speaker captions for AI notes...');
+          structuredData = await postCaptionsToBackend({
+            transcript: captionsData.rawTranscript || '',
+            utterances: captionsData.utterances || [],
+            participants: captionsData.participants || [],
+            geminiApiKey: geminiApiKey,
+            groqApiKey: groqApiKey
+          });
+        } else {
+          // No live captions captured — automatically transcribe crystal-clear audio recording with AI!
+          await chrome.storage.local.set({
+            processingStep: 'Transcribing meeting audio recording with AI...'
+          });
+          console.log('[Background] No captions in DOM, activating Audio AI transcription fallback...');
+
+          try {
+            const audioFallbackRes = await chrome.runtime.sendMessage({
+              type: 'PROCESS_AUDIO_FALLBACK',
+              backendUrl: activeUrl,
+              geminiApiKey: geminiApiKey,
+              groqApiKey: groqApiKey
+            });
+
+            if (audioFallbackRes && audioFallbackRes.success && audioFallbackRes.data) {
+              structuredData = audioFallbackRes.data;
+              console.log('[Background] Audio AI fallback transcription successful ✓');
+            } else {
+              throw new Error((audioFallbackRes && audioFallbackRes.error) || 'Audio AI fallback returned no data');
+            }
+          } catch (audioErr) {
+            console.warn('[Background] Audio AI fallback failed, posting captions payload as last resort:', audioErr.message);
+            structuredData = await postCaptionsToBackend({
+              transcript: captionsData.rawTranscript || '',
+              utterances: captionsData.utterances || [],
+              participants: captionsData.participants || [],
+              geminiApiKey: geminiApiKey,
+              groqApiKey: groqApiKey
+            });
+          }
+        }
 
         // Step 4: Download the 4 UTF-8 text files to the same meeting folder
         await chrome.storage.local.set({

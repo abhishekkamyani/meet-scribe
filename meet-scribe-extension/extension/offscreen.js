@@ -10,6 +10,7 @@
 
 let mediaRecorder = null;
 let recordedChunks = [];
+let lastCompiledAudioBlob = null;
 let mediaStream = null;
 let activeAudioContext = null;
 let activeMicGainNode = null;
@@ -246,6 +247,7 @@ async function stopRecording() {
 
         // Compile audio Blob
         const audioBlob = new Blob(recordedChunks, { type: 'audio/webm' });
+        lastCompiledAudioBlob = audioBlob;
         console.log(`[Offscreen] Compiled crystal-clear audio: ${(audioBlob.size / (1024 * 1024)).toFixed(2)} MB`);
 
         // IMMEDIATELY download audio to local Downloads folder BEFORE any cloud/AI call
@@ -281,6 +283,47 @@ async function stopRecording() {
   });
 }
 
+// Fallback: Transcribe audio with AI backend when live captions were not available in Google Meet
+async function processAudioFallback(backendUrl, geminiApiKey, groqApiKey) {
+  if (!lastCompiledAudioBlob || lastCompiledAudioBlob.size === 0) {
+    throw new Error('No audio recording available for AI transcription.');
+  }
+
+  const formData = new FormData();
+  formData.append('audio', lastCompiledAudioBlob, 'meeting_audio.webm');
+  if (geminiApiKey) formData.append('geminiApiKey', geminiApiKey);
+  if (groqApiKey) formData.append('groqApiKey', groqApiKey);
+
+  const cleanUrl = (backendUrl || 'http://localhost:3001').replace(/\/+$/, '');
+  console.log(`[Offscreen Audio Fallback] Sending audio (${(lastCompiledAudioBlob.size / (1024 * 1024)).toFixed(2)} MB) to ${cleanUrl}/api/process-meeting...`);
+
+  const response = await fetch(`${cleanUrl}/api/process-meeting`, {
+    method: 'POST',
+    headers: {
+      ...(geminiApiKey ? { 'X-Gemini-API-Key': geminiApiKey } : {}),
+      ...(groqApiKey ? { 'X-Groq-API-Key': groqApiKey } : {})
+    },
+    body: formData
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    let parsedMsg = errText;
+    try {
+      const j = JSON.parse(errText);
+      parsedMsg = j.error || j.message || errText;
+    } catch (e) {}
+    throw new Error(`Audio AI Error (${response.status}): ${parsedMsg}`);
+  }
+
+  const resJson = await response.json();
+  if (!resJson.success || !resJson.data) {
+    throw new Error(resJson.error || 'Invalid response from Audio AI backend.');
+  }
+
+  return { success: true, data: resJson.data };
+}
+
 // Listen for messages from background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_OFFSCREEN_RECORDING') {
@@ -302,6 +345,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((res) => sendResponse(res))
       .catch((err) => {
         console.error('[Offscreen] Stop recording failed:', err);
+        sendResponse({ success: false, error: err.message });
+      });
+    return true;
+
+  } else if (message.type === 'PROCESS_AUDIO_FALLBACK') {
+    processAudioFallback(message.backendUrl, message.geminiApiKey, message.groqApiKey)
+      .then(res => sendResponse(res))
+      .catch(err => {
+        console.error('[Offscreen] Audio fallback error:', err);
         sendResponse({ success: false, error: err.message });
       });
     return true;
