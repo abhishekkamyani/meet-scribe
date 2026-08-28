@@ -3,8 +3,7 @@
  * 1. Monitors Google Meet microphone mute/unmute state in real-time.
  * 2. Auto-enables Google Meet Closed Captions (CC) and maintains a persistent Keep-Alive Guardian.
  * 3. Scrapes 100% ground-truth real-time speaker-attributed captions from Google Meet DOM.
- * 4. Stealth Captions Shield: Keeps WebRTC captions stream alive even if user hides subtitles on screen.
- * 5. Extracts verified meeting participants roster.
+ * 4. Extracts verified meeting participants roster.
  */
 
 let lastMuteState = null;
@@ -14,7 +13,6 @@ let domObserver = null;
 let captionsObserver = null;
 let captionsKeepAliveInterval = null;
 let isCapturingCaptions = false;
-let isStealthMode = false;
 let lastCaptionsToggleTime = 0; // Cooldown: prevent keep-alive from re-triggering too soon after a CC click
 
 // Captions Storage: Array of { speaker: string, text: string, timestamp: string }
@@ -72,38 +70,8 @@ function cleanUpScript() {
 }
 
 /**
- * Inject or remove stealth CSS that allows captions to run in the background
- * without obstructing the user's video tiles or screen share.
+ * Remove any legacy stealth styles and ensure the meeting screen is never obstructed or hidden.
  */
-function injectStealthStyle() {
-  if (document.getElementById('meetscribe-stealth-style')) return;
-  const style = document.createElement('style');
-  style.id = 'meetscribe-stealth-style';
-  style.textContent = `
-    /*
-     * Stealth mode: captions are captured in the background but hidden from view.
-     * IMPORTANT: Do NOT use height:1px or overflow:hidden — these break innerText scraping
-     * because text outside the visible area is excluded from innerText.
-     * Use off-screen positioning + opacity:0 instead: invisible but fully DOM-readable.
-     */
-    .meetscribe-stealth-active div[jsname="YSxPtf"],
-    .meetscribe-stealth-active div.bh44bd,
-    .meetscribe-stealth-active div.T4LgNb,
-    .meetscribe-stealth-active div.a4cQT,
-    .meetscribe-stealth-active [role="region"][aria-label*="caption" i] {
-      opacity: 0 !important;
-      position: fixed !important;
-      left: -9999px !important;
-      top: -9999px !important;
-      pointer-events: none !important;
-      z-index: -9999 !important;
-      /* width/height intentionally NOT restricted — innerText needs normal element dimensions */
-    }
-  `;
-  document.head.appendChild(style);
-  document.body.classList.add('meetscribe-stealth-active');
-}
-
 function removeStealthStyle() {
   const style = document.getElementById('meetscribe-stealth-style');
   if (style) style.remove();
@@ -111,136 +79,162 @@ function removeStealthStyle() {
 }
 
 /**
- * Check if Google Meet Closed Captions are currently active
+ * Accurately find the Google Meet Closed Captions (CC) toggle button in the toolbar.
+ * Explicitly avoids clicking "Captions settings", "Language", or "More options" buttons
+ * to ensure settings modals are never opened.
  */
-function isMeetCaptionsActive() {
+function findCcToggleButton() {
   const allButtons = document.querySelectorAll('button, div[role="button"]');
+
+  // Pass 1: exact jsname match for the CC toggle button (Google Meet toolbar CC button)
   for (const btn of allButtons) {
-    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-    const jsname = btn.getAttribute('jsname') || '';
-
-    const isCcBtn =
-      label.includes('caption') ||
-      label.includes('subtitles') ||
-      label.includes('سب ٹائٹل') ||
-      label.includes('کیپشن') ||
-      tooltip.includes('caption') ||
-      tooltip.includes('subtitles') ||
-      tooltip.includes('turn on captions') ||
-      tooltip.includes('turn off captions') ||
-      jsname === 'r8qRAd';
-
-    if (isCcBtn) {
-      const isPressed = btn.getAttribute('aria-pressed') === 'true' ||
-        label.includes('turn off') ||
-        tooltip.includes('turn off');
-      return isPressed;
+    if (btn.closest('[role="dialog"]')) continue;
+    if (btn.getAttribute('jsname') === 'r8qRAd') {
+      const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+      const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+      if (
+        !label.includes('setting') && !tooltip.includes('setting') &&
+        !label.includes('language') && !tooltip.includes('language') &&
+        !label.includes('option') && !tooltip.includes('option')
+      ) {
+        return btn;
+      }
     }
   }
 
-  // Also check for caption container in DOM — but do NOT require text content.
-  // Captions go blank between utterances, causing false "CC is off" detection.
+  // Pass 2: standard CC toggle label/tooltip patterns
+  for (const btn of allButtons) {
+    if (btn.closest('[role="dialog"]')) continue;
+    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+
+    // Skip any settings, options, language, or menu buttons to avoid opening modals
+    if (
+      label.includes('setting') || tooltip.includes('setting') ||
+      label.includes('language') || tooltip.includes('language') ||
+      label.includes('more option') || tooltip.includes('more option') ||
+      label.includes('choose') || tooltip.includes('choose') ||
+      label.includes('menu') || tooltip.includes('menu')
+    ) {
+      continue;
+    }
+
+    const isCcToggle =
+      label.includes('turn on caption') || label.includes('turn off caption') ||
+      label.includes('turn on subtitle') || label.includes('turn off subtitle') ||
+      tooltip.includes('turn on caption') || tooltip.includes('turn off caption') ||
+      tooltip.includes('turn on subtitle') || tooltip.includes('turn off subtitle') ||
+      label.includes('کیپشن آن') || label.includes('کیپشن بند') ||
+      label.includes('سب ٹائٹل آن') || label.includes('سب ٹائٹل بند') ||
+      ((label.includes('caption') || tooltip.includes('caption')) && (label.includes('(c)') || tooltip.includes('(c)') || label.includes('ctrl+k') || tooltip.includes('ctrl+k')));
+
+    if (isCcToggle) {
+      return btn;
+    }
+  }
+
+  // Pass 3: generic caption button that is definitely not a settings button
+  for (const btn of allButtons) {
+    if (btn.closest('[role="dialog"]')) continue;
+    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+    if (
+      label.includes('setting') || tooltip.includes('setting') ||
+      label.includes('language') || tooltip.includes('language') ||
+      label.includes('option') || tooltip.includes('option') ||
+      label.includes('menu') || tooltip.includes('menu')
+    ) {
+      continue;
+    }
+
+    if (
+      label.includes('caption') || label.includes('subtitle') || label.includes('کیپشن') ||
+      tooltip.includes('caption') || tooltip.includes('subtitle')
+    ) {
+      return btn;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Check if Google Meet Closed Captions are currently active
+ */
+function isMeetCaptionsActive() {
+  const btn = findCcToggleButton();
+  if (btn) {
+    const isPressed = btn.getAttribute('aria-pressed') === 'true';
+    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+
+    if (
+      isPressed ||
+      label.includes('turn off') ||
+      tooltip.includes('turn off') ||
+      label.includes('کیپشن بند') ||
+      tooltip.includes('کیپشن بند')
+    ) {
+      return true;
+    }
+    if (
+      label.includes('turn on') ||
+      tooltip.includes('turn on') ||
+      label.includes('کیپشن آن') ||
+      tooltip.includes('کیپشن آن')
+    ) {
+      return false;
+    }
+  }
+
+  // Check for caption container in DOM
   const captionDom = document.querySelector([
     'div[jsname="YSxPtf"]',
-    'div.bh44bd',
-    'div.T4LgNb',
+    'div[jsname="tgaKEf"]',
+    'div.iTTPOb',
+    'div.nMx0df',
     '[role="region"][aria-label*="caption" i]',
-    '[aria-live][aria-atomic="false"]'
+    '[role="region"][aria-label*="subtitle" i]'
   ].join(', '));
-  // Container exists in DOM = CC is on (Google Meet removes it entirely when CC is off)
-  return Boolean(captionDom);
+
+  return Boolean(captionDom && (captionDom.children.length > 0 || (captionDom.innerText || '').trim().length > 0));
 }
 
 /**
- * Silently enable CC using the keyboard shortcut 'c'.
- * Dispatching the 'c' key directly toggles captions ON/OFF without opening the settings modal.
- * Clicking the toolbar button opens the modal — keyboard shortcut does not.
- */
-function silentlyToggleCaptionsOn() {
-  // Only toggle if CC is currently OFF
-  if (isMeetCaptionsActive()) return;
-
-  console.log('[MeetScribe] Silently re-enabling CC via keyboard shortcut...');
-  lastCaptionsToggleTime = Date.now();
-
-  // Dispatch 'c' key to document — Meet's global shortcut handler will catch it
-  ['keydown', 'keyup'].forEach(type => {
-    document.dispatchEvent(new KeyboardEvent(type, {
-      key: 'c', code: 'KeyC', keyCode: 67,
-      bubbles: true, cancelable: true
-    }));
-  });
-
-  // Also try on body in case Meet's handler is there
-  ['keydown', 'keyup'].forEach(type => {
-    document.body.dispatchEvent(new KeyboardEvent(type, {
-      key: 'c', code: 'KeyC', keyCode: 67,
-      bubbles: true, cancelable: true
-    }));
-  });
-
-  // After a brief pause, check if CC came back on
-  setTimeout(() => {
-    if (isMeetCaptionsActive()) {
-      console.log('[MeetScribe] CC re-enabled via keyboard shortcut ✓');
-      // Re-apply stealth so the newly visible container is hidden again
-      injectStealthStyle();
-    } else {
-      // Keyboard shortcut didn't work — try button click as last resort
-      console.log('[MeetScribe] Keyboard shortcut did not enable CC, falling back to button click...');
-      ensureCaptionsEnabled();
-    }
-  }, 800);
-}
-
-/**
- * Automatically ensure Google Meet Closed Captions (CC) are enabled.
- * Uses keyboard shortcut 'c' as primary (no modal), button click as fallback.
+ * Automatically ensure Google Meet Closed Captions (CC) are enabled without opening settings.
  */
 function ensureCaptionsEnabled() {
   try {
-    // Primary: keyboard shortcut 'c' directly toggles CC without opening any modal
-    // Only do this if CC is actually OFF (don't toggle off something that's on)
-    if (!isMeetCaptionsActive()) {
-      console.log('[MeetScribe] Enabling CC via keyboard shortcut “c”...');
-      lastCaptionsToggleTime = Date.now();
-      ['keydown', 'keyup'].forEach(type => {
-        document.dispatchEvent(new KeyboardEvent(type, {
-          key: 'c', code: 'KeyC', keyCode: 67,
-          bubbles: true, cancelable: true
-        }));
-      });
-
-      // Verify after 1s; if keyboard didn't work, fall back to button click
-      setTimeout(() => {
-        if (!isMeetCaptionsActive()) {
-          console.log('[MeetScribe] Keyboard shortcut did not work, trying CC button click...');
-          const allButtons = document.querySelectorAll('button, div[role="button"]');
-          for (const btn of allButtons) {
-            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-            const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-            const jsname = btn.getAttribute('jsname') || '';
-            const isCcBtn =
-              label.includes('caption') || label.includes('subtitles') ||
-              label.includes('سب ٹائٹل') || label.includes('کیپشن') ||
-              tooltip.includes('caption') || tooltip.includes('subtitles') ||
-              jsname === 'r8qRAd';
-            if (isCcBtn) {
-              const isPressed = btn.getAttribute('aria-pressed') === 'true' ||
-                label.includes('turn off') || tooltip.includes('turn off');
-              if (!isPressed) {
-                lastCaptionsToggleTime = Date.now();
-                btn.click();
-              }
-              return;
-            }
-          }
-        }
-      }, 1000);
-    } else {
+    if (isMeetCaptionsActive()) {
       console.log('[MeetScribe] Google Meet CC is already ON.');
+      return true;
     }
+
+    const ccBtn = findCcToggleButton();
+    if (ccBtn) {
+      const isPressed = ccBtn.getAttribute('aria-pressed') === 'true';
+      const label = (ccBtn.getAttribute('aria-label') || '').toLowerCase();
+      const tooltip = (ccBtn.getAttribute('data-tooltip') || '').toLowerCase();
+      const isOn = isPressed || label.includes('turn off') || tooltip.includes('turn off');
+
+      if (!isOn) {
+        console.log('[MeetScribe] Turning ON Google Meet CC via toggle button...');
+        lastCaptionsToggleTime = Date.now();
+        ccBtn.click();
+        return true;
+      }
+    }
+
+    // Keyboard shortcut fallback ('c')
+    console.log('[MeetScribe] Trying "c" shortcut key to enable CC...');
+    lastCaptionsToggleTime = Date.now();
+    ['keydown', 'keyup'].forEach(type => {
+      document.dispatchEvent(new KeyboardEvent(type, {
+        key: 'c', code: 'KeyC', keyCode: 67,
+        bubbles: true, cancelable: true
+      }));
+    });
+
     return true;
   } catch (err) {
     console.warn('[MeetScribe] Error ensuring captions enabled:', err);
@@ -254,31 +248,28 @@ function ensureCaptionsEnabled() {
 function maintainCaptionsKeepAlive() {
   if (!isCapturingCaptions) return;
 
-  // Cooldown between re-enable attempts
-  if (Date.now() - lastCaptionsToggleTime < 3000) return;
+  // Cooldown between re-enable attempts (5s)
+  if (Date.now() - lastCaptionsToggleTime < 5000) return;
 
   if (!isMeetCaptionsActive()) {
-    // CC is off — re-enable silently via keyboard shortcut (no modal)
-    // This fires whether the user turned it off intentionally or Meet closed it.
-    // The stealth CSS keeps it invisible so the user doesn’t see captions on screen.
-    console.log('[MeetScribe] CC closed while recording — silently re-enabling in background...');
-    silentlyToggleCaptionsOn();
+    console.log('[MeetScribe] CC closed while recording — re-enabling in background...');
+    ensureCaptionsEnabled();
   }
 }
 
 /**
  * Real-time Closed Captions Scraper & Accumulator
  * Uses a multi-layer detection strategy to survive Google Meet DOM changes:
- * Layer 1: Known jsname/class selectors (most specific, can go stale)
+ * Layer 1: Known jsname/class selectors for caption containers
  * Layer 2: Semantic ARIA attributes (stable across Meet versions)
- * Layer 3: Broad aria-live sweep (last resort, catches anything)
+ * Layer 3: Broad aria-live sweep in lower screen
  */
 function findCaptionContainer() {
-  // Layer 1: Known selectors
+  // Layer 1: Known selectors for captions container
   const knownSelectors = [
     'div[jsname="YSxPtf"]',
+    'div[jsname="tgaKEf"]',
     'div.bh44bd',
-    'div.T4LgNb',
     'div.a4cQT',
   ];
   for (const sel of knownSelectors) {
@@ -322,8 +313,8 @@ function processCaptionsDOM() {
     // Try specific child selectors first, fall back to container itself
     const childSelectors = [
       'div[jsname="YSxPtf"] > div',
+      'div[jsname="tgaKEf"] > div',
       'div.bh44bd > div',
-      'div.T4LgNb > div',
       'div.iTTPOb',
       'div.nMx0df',
       '[role="region"][aria-label*="caption" i] > div',
@@ -357,7 +348,7 @@ function processCaptionsDOM() {
       }
 
       if (!speakerName) {
-        const parent = block.closest('div[jsname="YSxPtf"], div.bh44bd, div.T4LgNb, [role="region"]');
+        const parent = block.closest('div[jsname="YSxPtf"], div[jsname="tgaKEf"], div.bh44bd, [role="region"]');
         if (parent) {
           const prevHeader = parent.querySelector('.zs75Ib, .NW0r5c, .jxFHg');
           if (prevHeader) speakerName = prevHeader.innerText.trim();
@@ -378,8 +369,7 @@ function processCaptionsDOM() {
       }
 
       // 2. Extract Spoken Text
-      // Try specific span selectors first, then fall back to full innerText
-      const textEls = block.querySelectorAll('span.VbkSUe, span.iTTPOb, div.T4LgNb, .yg3Swb, span[jsname="VbkSUe"]');
+      const textEls = block.querySelectorAll('span.VbkSUe, span.iTTPOb, .yg3Swb, span[jsname="VbkSUe"]');
       let textContent = '';
 
       if (textEls.length > 0) {
@@ -461,7 +451,7 @@ function startCaptionsObserver() {
   }
 
   isCapturingCaptions = true;
-  injectStealthStyle();  // Also applies meetscribe-stealth-active class to body
+  removeStealthStyle(); // Ensure no legacy stealth styles linger
   ensureCaptionsEnabled();
 
   // Warn if CC still not active 4 seconds after start (user may need to enable it)
@@ -474,16 +464,12 @@ function startCaptionsObserver() {
     }
   }, 4000);
 
-  // Keep-alive guardian runs every 3s to re-enable CC if Meet closes it unexpectedly
-  // (interval is intentionally not too aggressive to avoid fighting with user interactions)
-  captionsKeepAliveInterval = setInterval(maintainCaptionsKeepAlive, 3000);
+  // Keep-alive guardian runs every 4s to re-enable CC if Meet closes it unexpectedly
+  captionsKeepAliveInterval = setInterval(maintainCaptionsKeepAlive, 4000);
 
   captionsObserver = new MutationObserver(() => {
     if (isCapturingCaptions) {
       processCaptionsDOM();
-      // C7 fix: do NOT call maintainCaptionsKeepAlive() here — on active Meet pages the observer
-      // fires hundreds of times per second, completely defeating the 3s cooldown timer.
-      // Keep-alive runs only on the timed interval (every 3s) set above.
     }
   });
 
