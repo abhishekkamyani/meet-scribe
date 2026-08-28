@@ -66,15 +66,45 @@ function cleanUpScript() {
     clearTimeout(debounceTimeout);
     debounceTimeout = null;
   }
-  removeStealthStyle();
+  removeHideCaptionsStyle();
 }
 
 /**
- * Remove any legacy stealth styles and ensure the meeting screen is never obstructed or hidden.
+ * Visually hides Google Meet subtitles/captions box on screen during recording
+ * so it does not distract the user or block video tiles, while keeping it in the DOM
+ * so the extension can scrape the real-time transcript with 100% accuracy.
  */
-function removeStealthStyle() {
-  const style = document.getElementById('meetscribe-stealth-style');
+function injectHideCaptionsStyle() {
+  if (document.getElementById('meetscribe-hide-captions-style')) return;
+  const style = document.createElement('style');
+  style.id = 'meetscribe-hide-captions-style';
+  style.textContent = `
+    /* MeetScribe: Visually hide subtitles box on screen without affecting video or DOM tree */
+    .meetscribe-hide-captions div[jsname="YSxPtf"],
+    .meetscribe-hide-captions div[jsname="tgaKEf"],
+    .meetscribe-hide-captions div.iTTPOb,
+    .meetscribe-hide-captions div.nMx0df,
+    .meetscribe-hide-captions div.a4cQT,
+    .meetscribe-hide-captions div.K6y0wf,
+    .meetscribe-hide-captions [role="region"][aria-label*="caption" i],
+    .meetscribe-hide-captions [role="region"][aria-label*="subtitle" i],
+    .meetscribe-hide-captions [role="region"][aria-label*="کیپشن" i] {
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+  `;
+  document.head.appendChild(style);
+  document.body.classList.add('meetscribe-hide-captions');
+}
+
+function removeHideCaptionsStyle() {
+  const style = document.getElementById('meetscribe-hide-captions-style');
   if (style) style.remove();
+  document.body.classList.remove('meetscribe-hide-captions');
+
+  // Also clean up any legacy stealth styles if present
+  const legacyStyle = document.getElementById('meetscribe-stealth-style');
+  if (legacyStyle) legacyStyle.remove();
   document.body.classList.remove('meetscribe-stealth-active');
 }
 
@@ -451,7 +481,7 @@ function startCaptionsObserver() {
   }
 
   isCapturingCaptions = true;
-  removeStealthStyle(); // Ensure no legacy stealth styles linger
+  injectHideCaptionsStyle(); // Keep subtitles visually hidden from user while recording
   ensureCaptionsEnabled();
 
   // Warn if CC still not active 4 seconds after start (user may need to enable it)
@@ -495,7 +525,7 @@ function stopCaptionsObserver() {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
-  removeStealthStyle();
+  removeHideCaptionsStyle();
 
   processCaptionsDOM();
   return getFormattedCaptions();
@@ -756,10 +786,6 @@ function initObserver() {
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
       setTimeout(triggerStateCheck, 20);
-    }
-    // If user presses 'c' to toggle CC while recording, let keep-alive manage it
-    if ((e.key === 'c' || e.key === 'C') && isCapturingCaptions && !e.ctrlKey && !e.metaKey && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
-      setTimeout(maintainCaptionsKeepAlive, 50);
     }
   });
 
