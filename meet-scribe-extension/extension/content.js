@@ -1,9 +1,8 @@
 /**
  * MeetScribe Urdu - Google Meet Content Script
  * 1. Monitors Google Meet microphone mute/unmute state in real-time.
- * 2. Auto-enables Google Meet Closed Captions (CC) and maintains a persistent Keep-Alive Guardian.
- * 3. Scrapes 100% ground-truth real-time speaker-attributed captions from Google Meet DOM.
- * 4. Extracts verified meeting participants roster.
+ * 2. Scrapes 100% ground-truth real-time speaker-attributed captions from Google Meet DOM (passive).
+ * 3. Extracts verified meeting participants roster.
  */
 
 let lastMuteState = null;
@@ -11,9 +10,7 @@ let debounceTimeout = null;
 let pollInterval = null;
 let domObserver = null;
 let captionsObserver = null;
-let captionsKeepAliveInterval = null;
 let isCapturingCaptions = false;
-let lastCaptionsToggleTime = 0; // Cooldown: prevent keep-alive from re-triggering too soon after a CC click
 
 // Captions Storage: Array of { speaker: string, text: string, timestamp: string }
 let captionsHistory = [];
@@ -54,10 +51,6 @@ function cleanUpScript() {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
-  if (captionsKeepAliveInterval) {
-    clearInterval(captionsKeepAliveInterval);
-    captionsKeepAliveInterval = null;
-  }
   if (pollInterval) {
     clearInterval(pollInterval);
     pollInterval = null;
@@ -70,154 +63,22 @@ function cleanUpScript() {
 }
 
 /**
- * Visually hides Google Meet subtitles/captions box on screen during recording
- * so it does not distract the user or block video tiles, while keeping it in the DOM
- * so the extension can scrape the real-time transcript with 100% accuracy.
+ * Clean up any injected styles if present
  */
-function injectHideCaptionsStyle() {
-  if (document.getElementById('meetscribe-hide-captions-style')) return;
-  const style = document.createElement('style');
-  style.id = 'meetscribe-hide-captions-style';
-  style.textContent = `
-    /* MeetScribe: Visually hide subtitles box on screen without affecting video or DOM tree */
-    .meetscribe-hide-captions div[jsname="YSxPtf"],
-    .meetscribe-hide-captions div[jsname="tgaKEf"],
-    .meetscribe-hide-captions div.iTTPOb,
-    .meetscribe-hide-captions div.nMx0df,
-    .meetscribe-hide-captions div.a4cQT,
-    .meetscribe-hide-captions div.K6y0wf,
-    .meetscribe-hide-captions [role="region"][aria-label*="caption" i],
-    .meetscribe-hide-captions [role="region"][aria-label*="subtitle" i],
-    .meetscribe-hide-captions [role="region"][aria-label*="کیپشن" i] {
-      opacity: 0 !important;
-      pointer-events: none !important;
-    }
-  `;
-  document.head.appendChild(style);
-  document.body.classList.add('meetscribe-hide-captions');
-}
-
 function removeHideCaptionsStyle() {
   const style = document.getElementById('meetscribe-hide-captions-style');
   if (style) style.remove();
   document.body.classList.remove('meetscribe-hide-captions');
 
-  // Also clean up any legacy stealth styles if present
   const legacyStyle = document.getElementById('meetscribe-stealth-style');
   if (legacyStyle) legacyStyle.remove();
   document.body.classList.remove('meetscribe-stealth-active');
 }
 
 /**
- * Accurately find the Google Meet Closed Captions (CC) toggle button in the toolbar.
- * Explicitly avoids clicking "Captions settings", "Language", or "More options" buttons
- * to ensure settings modals are never opened.
- */
-function findCcToggleButton() {
-  const allButtons = document.querySelectorAll('button, div[role="button"]');
-
-  // Pass 1: exact jsname match for the CC toggle button (Google Meet toolbar CC button)
-  for (const btn of allButtons) {
-    if (btn.closest('[role="dialog"]')) continue;
-    if (btn.getAttribute('jsname') === 'r8qRAd') {
-      const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-      const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-      if (
-        !label.includes('setting') && !tooltip.includes('setting') &&
-        !label.includes('language') && !tooltip.includes('language') &&
-        !label.includes('option') && !tooltip.includes('option')
-      ) {
-        return btn;
-      }
-    }
-  }
-
-  // Pass 2: standard CC toggle label/tooltip patterns
-  for (const btn of allButtons) {
-    if (btn.closest('[role="dialog"]')) continue;
-    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-
-    // Skip any settings, options, language, or menu buttons to avoid opening modals
-    if (
-      label.includes('setting') || tooltip.includes('setting') ||
-      label.includes('language') || tooltip.includes('language') ||
-      label.includes('more option') || tooltip.includes('more option') ||
-      label.includes('choose') || tooltip.includes('choose') ||
-      label.includes('menu') || tooltip.includes('menu')
-    ) {
-      continue;
-    }
-
-    const isCcToggle =
-      label.includes('turn on caption') || label.includes('turn off caption') ||
-      label.includes('turn on subtitle') || label.includes('turn off subtitle') ||
-      tooltip.includes('turn on caption') || tooltip.includes('turn off caption') ||
-      tooltip.includes('turn on subtitle') || tooltip.includes('turn off subtitle') ||
-      label.includes('کیپشن آن') || label.includes('کیپشن بند') ||
-      label.includes('سب ٹائٹل آن') || label.includes('سب ٹائٹل بند') ||
-      ((label.includes('caption') || tooltip.includes('caption')) && (label.includes('(c)') || tooltip.includes('(c)') || label.includes('ctrl+k') || tooltip.includes('ctrl+k')));
-
-    if (isCcToggle) {
-      return btn;
-    }
-  }
-
-  // Pass 3: generic caption button that is definitely not a settings button
-  for (const btn of allButtons) {
-    if (btn.closest('[role="dialog"]')) continue;
-    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-    if (
-      label.includes('setting') || tooltip.includes('setting') ||
-      label.includes('language') || tooltip.includes('language') ||
-      label.includes('option') || tooltip.includes('option') ||
-      label.includes('menu') || tooltip.includes('menu')
-    ) {
-      continue;
-    }
-
-    if (
-      label.includes('caption') || label.includes('subtitle') || label.includes('کیپشن') ||
-      tooltip.includes('caption') || tooltip.includes('subtitle')
-    ) {
-      return btn;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Check if Google Meet Closed Captions are currently active
+ * Check if Google Meet Closed Captions are currently active in DOM
  */
 function isMeetCaptionsActive() {
-  const btn = findCcToggleButton();
-  if (btn) {
-    const isPressed = btn.getAttribute('aria-pressed') === 'true';
-    const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const tooltip = (btn.getAttribute('data-tooltip') || '').toLowerCase();
-
-    if (
-      isPressed ||
-      label.includes('turn off') ||
-      tooltip.includes('turn off') ||
-      label.includes('کیپشن بند') ||
-      tooltip.includes('کیپشن بند')
-    ) {
-      return true;
-    }
-    if (
-      label.includes('turn on') ||
-      tooltip.includes('turn on') ||
-      label.includes('کیپشن آن') ||
-      tooltip.includes('کیپشن آن')
-    ) {
-      return false;
-    }
-  }
-
-  // Check for caption container in DOM
   const captionDom = document.querySelector([
     'div[jsname="YSxPtf"]',
     'div[jsname="tgaKEf"]',
@@ -228,63 +89,6 @@ function isMeetCaptionsActive() {
   ].join(', '));
 
   return Boolean(captionDom && (captionDom.children.length > 0 || (captionDom.innerText || '').trim().length > 0));
-}
-
-/**
- * Automatically ensure Google Meet Closed Captions (CC) are enabled without opening settings.
- */
-function ensureCaptionsEnabled() {
-  try {
-    if (isMeetCaptionsActive()) {
-      console.log('[MeetScribe] Google Meet CC is already ON.');
-      return true;
-    }
-
-    const ccBtn = findCcToggleButton();
-    if (ccBtn) {
-      const isPressed = ccBtn.getAttribute('aria-pressed') === 'true';
-      const label = (ccBtn.getAttribute('aria-label') || '').toLowerCase();
-      const tooltip = (ccBtn.getAttribute('data-tooltip') || '').toLowerCase();
-      const isOn = isPressed || label.includes('turn off') || tooltip.includes('turn off');
-
-      if (!isOn) {
-        console.log('[MeetScribe] Turning ON Google Meet CC via toggle button...');
-        lastCaptionsToggleTime = Date.now();
-        ccBtn.click();
-        return true;
-      }
-    }
-
-    // Keyboard shortcut fallback ('c')
-    console.log('[MeetScribe] Trying "c" shortcut key to enable CC...');
-    lastCaptionsToggleTime = Date.now();
-    ['keydown', 'keyup'].forEach(type => {
-      document.dispatchEvent(new KeyboardEvent(type, {
-        key: 'c', code: 'KeyC', keyCode: 67,
-        bubbles: true, cancelable: true
-      }));
-    });
-
-    return true;
-  } catch (err) {
-    console.warn('[MeetScribe] Error ensuring captions enabled:', err);
-    return false;
-  }
-}
-
-/**
- * Captions Keep-Alive Guardian: Automatically re-enables captions if closed by user/Meet
- */
-function maintainCaptionsKeepAlive() {
-  if (!isCapturingCaptions) return;
-
-  // Cooldown between re-enable attempts (5s)
-  if (Date.now() - lastCaptionsToggleTime < 5000) return;
-
-  if (!isMeetCaptionsActive()) {
-    console.log('[MeetScribe] CC closed while recording — re-enabling in background...');
-    ensureCaptionsEnabled();
-  }
 }
 
 /**
@@ -475,27 +279,9 @@ function startCaptionsObserver() {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
   }
-  if (captionsKeepAliveInterval) {
-    clearInterval(captionsKeepAliveInterval);
-    captionsKeepAliveInterval = null;
-  }
 
   isCapturingCaptions = true;
-  injectHideCaptionsStyle(); // Keep subtitles visually hidden from user while recording
-  ensureCaptionsEnabled();
-
-  // Warn if CC still not active 4 seconds after start (user may need to enable it)
-  setTimeout(() => {
-    if (isCapturingCaptions && !isMeetCaptionsActive()) {
-      console.warn('[MeetScribe] WARNING: Google Meet captions do not appear to be active 4s into recording.');
-      safeSendMessage({ type: 'CAPTIONS_NOT_DETECTED' });
-    } else if (isCapturingCaptions) {
-      console.log('[MeetScribe] Captions confirmed active and being captured.');
-    }
-  }, 4000);
-
-  // Keep-alive guardian runs every 4s to re-enable CC if Meet closes it unexpectedly
-  captionsKeepAliveInterval = setInterval(maintainCaptionsKeepAlive, 4000);
+  removeHideCaptionsStyle();
 
   captionsObserver = new MutationObserver(() => {
     if (isCapturingCaptions) {
@@ -509,7 +295,7 @@ function startCaptionsObserver() {
     characterData: true
   });
 
-  console.log('[MeetScribe Content] Real-time Captions Observer & Keep-Alive Guardian active.');
+  console.log('[MeetScribe Content] Real-time Captions Observer active (passive mode).');
 }
 
 /**
@@ -517,10 +303,6 @@ function startCaptionsObserver() {
  */
 function stopCaptionsObserver() {
   isCapturingCaptions = false;
-  if (captionsKeepAliveInterval) {
-    clearInterval(captionsKeepAliveInterval);
-    captionsKeepAliveInterval = null;
-  }
   if (captionsObserver) {
     try { captionsObserver.disconnect(); } catch (e) {}
     captionsObserver = null;
