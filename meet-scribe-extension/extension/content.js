@@ -59,13 +59,14 @@ function injectCaptionsOverlayStyle() {
   if (document.getElementById('meetscribe-captions-overlay-style')) return;
   const s = document.createElement('style');
   s.id = 'meetscribe-captions-overlay-style';
+  // Hide the captions UI from the user completely while keeping the DOM alive for scraping.
+  // opacity:0 + pointer-events:none makes the element invisible but still present in the DOM tree.
   s.textContent = `
-    div[jsname="YSxPtf"], div[jsname="tgaKEf"], div.a4cQT,
+    div[jsname="YSxPtf"], div[jsname="tgaKEf"], div.a4cQT, div.bh44bd,
     [role="region"][aria-label*="caption" i], [role="region"][aria-label*="subtitle" i] {
-      position: absolute !important; bottom: 80px !important;
-      left: 50% !important; transform: translateX(-50%) !important;
-      max-width: 85% !important; height: auto !important;
-      max-height: 120px !important; z-index: 10 !important; pointer-events: none !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+      user-select: none !important;
     }`;
   document.head.appendChild(s);
 }
@@ -199,8 +200,31 @@ function extractSpeakerFromBlock(block) {
 }
 
 /* ── Text Extraction from caption block ─────────────────────────────────── */
-function extractTextFromBlock(block, speakerEl) {
-  // Try known spoken-text span selectors first
+
+/**
+ * Strip noise from a cloned DOM node before reading text:
+ * - aria-hidden elements (Material Icons, decorative spans)
+ * - Speaker name elements
+ * - img tags
+ * - Elements with font-family: 'Material Icons' or 'Material Symbols'
+ */
+function cleanCloneForText(clone) {
+  // Remove aria-hidden nodes (icon fonts always mark themselves aria-hidden)
+  clone.querySelectorAll('[aria-hidden="true"]').forEach(el => el.remove());
+  // Remove Material Icon text explicitly (they leak as text like "arrow_downward", "close", etc.)
+  clone.querySelectorAll('.material-icons, .material-symbols-outlined, .material-symbols-rounded,
+    [class*="material-icon"], [class*="google-material"]').forEach(el => el.remove());
+  // Remove speaker name elements
+  clone.querySelectorAll('.zs75Ib, .NW0r5c, .jxFHg, .KcIKyf, img').forEach(el => el.remove());
+  // Remove any element that looks like an icon keyword (short all-lowercase word that's a known icon name)
+  const ICON_PATTERN = /^(arrow_downward|arrow_upward|jump_to|expand_more|expand_less|close|check|info|warning|error|more_vert|more_horiz|chevron|keyboard_arrow)$/i;
+  clone.querySelectorAll('span, i').forEach(el => {
+    if (ICON_PATTERN.test((el.textContent || '').trim())) el.remove();
+  });
+}
+
+function extractTextFromBlock(block) {
+  // Try known spoken-text span selectors first (most precise)
   const TEXT_SELECTORS = [
     'span.VbkSUe', 'span[jsname="VbkSUe"]', 'span.iTTPOb',
     'span.yg3Swb', '.a4cQT span', 'span[data-message-text]'
@@ -208,21 +232,27 @@ function extractTextFromBlock(block, speakerEl) {
   for (const sel of TEXT_SELECTORS) {
     const spans = block.querySelectorAll(sel);
     if (spans.length > 0) {
-      const txt = Array.from(spans).map(s => s.innerText || '').join(' ').replace(/\s+/g, ' ').trim();
+      // Build text from each span's clone to strip icons inside spans too
+      const parts = Array.from(spans).map(s => {
+        const c = s.cloneNode(true);
+        cleanCloneForText(c);
+        return (c.innerText || '').trim();
+      }).filter(Boolean);
+      const txt = parts.join(' ').replace(/\s+/g, ' ').trim();
       if (txt.length > 0) return txt;
     }
   }
 
-  // Fallback: clone the block, remove the speaker element, return remaining text
+  // Fallback: clone the block, remove noise, read remaining text
   const clone = block.cloneNode(true);
-  for (const sel of ['.zs75Ib', '.NW0r5c', '.jxFHg', '.KcIKyf', 'img']) {
-    clone.querySelectorAll(sel).forEach(el => el.remove());
-  }
+  cleanCloneForText(clone);
   const txt = (clone.innerText || '').replace(/\s+/g, ' ').trim();
   if (txt.length > 0) return txt;
 
-  // Last resort: full innerText
-  return (block.innerText || '').replace(/\s+/g, ' ').trim();
+  // Last resort: raw innerText stripped of known icon strings
+  return (block.innerText || '')
+    .replace(/arrow_downward|arrow_upward|Jump to bottom|Jump to top|expand_more|expand_less|close|more_vert/gi, '')
+    .replace(/\s+/g, ' ').trim();
 }
 
 /* ── Main Captions Scraper ───────────────────────────────────────────────── */
@@ -268,7 +298,7 @@ function processCaptionsDOM() {
 
     blocks.forEach((block, idx) => {
       const speaker = extractSpeakerFromBlock(block) || discoveredSelfName || 'Participant';
-      const text    = extractTextFromBlock(block, null);
+      const text    = extractTextFromBlock(block);
 
       if (!text || text.length < 2) return;
 
