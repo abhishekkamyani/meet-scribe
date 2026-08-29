@@ -74,29 +74,33 @@ async function processLatestRecording() {
 
   // Strategy 2: Gemini Audio
   if (!rawDialogue && hasGemini) {
-    try {
-      console.log('✨ Transcribing with Google Gemini Audio (gemini-2.0-flash)...');
-      const genAI = new GoogleGenerativeAI(geminiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-      const fileBuffer = fs.readFileSync(audioPath);
-      const base64Audio = fileBuffer.toString('base64');
+    const genAI = new GoogleGenerativeAI(geminiKey);
+    const fileBuffer = fs.readFileSync(audioPath);
+    const base64Audio = fileBuffer.toString('base64');
+    const audioModels = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
 
-      const result = await model.generateContent([
-        `Please listen to this meeting audio recording and transcribe all spoken Urdu and English dialogue verbatim.
+    for (const modelName of audioModels) {
+      try {
+        console.log(`✨ Transcribing with Google Gemini Audio (${modelName})...`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent([
+          `Please listen to this meeting audio recording and transcribe all spoken Urdu and English dialogue verbatim.
 Identify and attribute distinct speakers (e.g. [Speaker 1], [Speaker 2], [Host]).
 Format:
 [Speaker Name]: [Spoken dialogue]`,
-        {
-          inlineData: {
-            mimeType: 'audio/webm',
-            data: base64Audio
+          {
+            inlineData: {
+              mimeType: 'audio/webm',
+              data: base64Audio
+            }
           }
-        }
-      ]);
-      const res = await result.response;
-      rawDialogue = res.text().trim();
-    } catch (e) {
-      console.warn('⚠️ Gemini Audio failed:', e.message);
+        ]);
+        const res = await result.response;
+        rawDialogue = res.text().trim();
+        if (rawDialogue) break;
+      } catch (e) {
+        console.warn(`⚠️ Gemini Audio (${modelName}) failed:`, e.message);
+      }
     }
   }
 
@@ -107,13 +111,18 @@ Format:
 
   console.log('📝 Structuring bilingual transcripts & action items with Gemini...');
   const genAI = new GoogleGenerativeAI(geminiKey || groqKey);
-  const structModel = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: 'application/json'
-    },
-    systemInstruction: `You are a world-class bilingual executive scribe for Urdu and English (Urdish).
+  const structModels = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  let jsonText = '';
+
+  for (const modelName of structModels) {
+    try {
+      const structModel = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json'
+        },
+        systemInstruction: `You are a world-class bilingual executive scribe for Urdu and English (Urdish).
 Convert raw dialogue into polished bilingual transcripts and action items.
 Rules:
 - Strict speaker attribution: [Speaker Name]: on every line of transcripts.
@@ -127,15 +136,24 @@ Output JSON schema:
   "action_items_urdu": "Bullet-pointed tasks with assigned person names in Urdu",
   "action_items_english_improved": "Polished business English action items"
 }`
-  });
+      });
 
-  const structRes = await structModel.generateContent(
-    `Here is the raw transcribed meeting dialogue:\n\n${rawDialogue}\n\nFormat into bilingual transcripts and action items adhering strictly to schema.`
-  );
-  const jsonText = structRes.response.text().trim()
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '');
+      const structRes = await structModel.generateContent(
+        `Here is the raw transcribed meeting dialogue:\n\n${rawDialogue}\n\nFormat into bilingual transcripts and action items adhering strictly to schema.`
+      );
+      jsonText = structRes.response.text().trim()
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '');
+      if (jsonText) break;
+    } catch (e) {
+      console.warn(`⚠️ Structuring with ${modelName} failed:`, e.message);
+    }
+  }
+
+  if (!jsonText) {
+    throw new Error('Failed to structure notes with Gemini models.');
+  }
 
   const data = JSON.parse(jsonText);
   const utf8BOM = '\uFEFF';
