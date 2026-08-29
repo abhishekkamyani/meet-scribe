@@ -19,21 +19,21 @@ let isMeetMicMuted = false;
 let rawStreams = [];
 let currentMeetingFolder = '';
 
-// Helper: Dynamically mute/unmute local microphone stream based on Google Meet status
+// Helper: Maintain local microphone stream for recorder
 function setMicMuteState(isMuted) {
   isMeetMicMuted = Boolean(isMuted);
-  console.log(`[Offscreen] Mic Sync: Local Mic is ${isMeetMicMuted ? 'MUTED' : 'UNMUTED'}`);
+  console.log(`[Offscreen] Mic Sync: Local Mic status updated: ${isMeetMicMuted ? 'MUTED on Meet' : 'UNMUTED on Meet'}`);
 
+  // Always keep microphone track active in recorder so audio transcription has speech
   if (activeMicTrack) {
-    try { activeMicTrack.enabled = !isMeetMicMuted; } catch (e) {}
+    try { activeMicTrack.enabled = true; } catch (e) {}
   }
 
   if (activeMicGainNode && activeAudioContext && activeAudioContext.state !== 'closed') {
     try {
       const now = activeAudioContext.currentTime;
       activeMicGainNode.gain.cancelScheduledValues(now);
-      const targetGain = isMeetMicMuted ? 0.0 : 1.0;
-      activeMicGainNode.gain.setValueAtTime(targetGain, now);
+      activeMicGainNode.gain.setValueAtTime(1.0, now);
     } catch (e) {}
   }
 }
@@ -187,9 +187,8 @@ async function startRecording(streamId, initialMuteState = false) {
     highpassFilter.Q.setValueAtTime(0.7, activeAudioContext.currentTime);
 
     activeMicGainNode = activeAudioContext.createGain();
-    const initialGain = isMeetMicMuted ? 0.0 : 1.0;
-    activeMicGainNode.gain.setValueAtTime(initialGain, activeAudioContext.currentTime);
-    if (activeMicTrack) activeMicTrack.enabled = !isMeetMicMuted;
+    activeMicGainNode.gain.setValueAtTime(1.0, activeAudioContext.currentTime);
+    if (activeMicTrack) activeMicTrack.enabled = true;
 
     micSourceNode.connect(highpassFilter);
     highpassFilter.connect(activeMicGainNode);

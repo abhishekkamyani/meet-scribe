@@ -303,27 +303,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         let structuredData = null;
         const participants = captionsData.participants || [];
+        const hasLiveCaptions = Boolean(captionsData && captionsData.rawTranscript && captionsData.rawTranscript.trim().length > 10);
 
-        try {
-          console.log(`[Background] Processing audio recording with attendees: ${participants.join(', ') || 'Call Participants'}`);
-          const audioRes = await chrome.runtime.sendMessage({
-            type: 'PROCESS_AUDIO_FALLBACK',
-            backendUrl: activeUrl,
-            geminiApiKey: geminiApiKey,
-            groqApiKey: groqApiKey,
-            participants: participants
-          });
-
-          if (audioRes && audioRes.success && audioRes.data) {
-            structuredData = audioRes.data;
-            console.log('[Background] Audio AI processing successful ✓');
-          } else {
-            throw new Error((audioRes && audioRes.error) || 'Audio AI returned no data');
-          }
-        } catch (audioErr) {
-          console.warn('[Background] Primary audio AI processing failed:', audioErr.message);
-          if (captionsData && captionsData.rawTranscript && captionsData.rawTranscript.trim().length > 0) {
-            console.log('[Background] Attempting captions fallback...');
+        // 1. Prefer ground-truth Closed Captions directly from Google Meet if available (100% accurate speaker names & zero AI audio hallucination)
+        if (hasLiveCaptions) {
+          try {
+            console.log(`[Background] Processing ground-truth Google Meet captions (${captionsData.rawTranscript.length} chars)...`);
             structuredData = await postCaptionsToBackend({
               transcript: captionsData.rawTranscript,
               utterances: captionsData.utterances || [],
@@ -331,8 +316,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               geminiApiKey: geminiApiKey,
               groqApiKey: groqApiKey
             });
-          } else {
-            throw new Error(`AI Processing Failed: ${audioErr.message}. Ensure your Gemini API Key is entered in Settings (⚙️) or backend .env.`);
+            console.log('[Background] Ground-truth captions processing successful ✓');
+          } catch (capErr) {
+            console.warn('[Background] Live captions processing failed, attempting audio fallback:', capErr.message);
+          }
+        }
+
+        // 2. Audio Processing (if captions were not active or failed)
+        if (!structuredData) {
+          try {
+            console.log(`[Background] Processing audio recording with attendees: ${participants.join(', ') || 'Call Participants'}`);
+            const audioRes = await chrome.runtime.sendMessage({
+              type: 'PROCESS_AUDIO_FALLBACK',
+              backendUrl: activeUrl,
+              geminiApiKey: geminiApiKey,
+              groqApiKey: groqApiKey,
+              participants: participants
+            });
+
+            if (audioRes && audioRes.success && audioRes.data) {
+              structuredData = audioRes.data;
+              console.log('[Background] Audio AI processing successful ✓');
+            } else {
+              throw new Error((audioRes && audioRes.error) || 'Audio AI returned no data');
+            }
+          } catch (audioErr) {
+            throw new Error(`AI Processing Failed: ${audioErr.message}. Please verify your Gemini API Key in Settings (⚙️).`);
           }
         }
 
