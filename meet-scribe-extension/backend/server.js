@@ -107,50 +107,47 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
 
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const participantsHint = participantsList.length > 0
-    ? `AUTHENTIC GOOGLE MEET ATTENDEES IN THIS CALL:\n${participantsList.map(p => `- ${p}`).join('\n')}`
-    : `AUTHENTIC GOOGLE MEET PARTICIPANTS: Identify distinct conversational speakers (e.g. Host, Team Member, Participant).`;
+    ? `VERIFIED MEETING ATTENDEES (use these exact names for attribution):\n${participantsList.map(p => `- ${p}`).join('\n')}`
+    : `PARTICIPANTS: Use speaker labels exactly as they appear in the input (e.g. [Speaker Name]:). Do not invent names.`;
 
-  const systemInstruction = `You are a world-class bilingual executive scribe and translator specializing in Urdu, English, and corporate conversations (Urdish).
-
-You convert raw meeting conversations and captions into polished, highly accurate bilingual transcripts with complete speaker attribution.
+  const systemInstruction = `You are an expert bilingual Urdu/English meeting scribe. Your ONLY job is to faithfully format and translate the EXACT captions text you receive. You do NOT summarize, paraphrase, invent, hallucinate, or add any content not present in the input.
 
 ${participantsHint}
 
-CRITICAL RULES:
-1. STRICT SPEAKER NAME ATTRIBUTION (MANDATORY ON EVERY SINGLE LINE):
-   - EVERY SINGLE LINE in "transcript_urdu" and "transcript_english" MUST begin with "[Speaker Name]: " (e.g. "[Shoaib Shah]: ...", "[Abhishek Kamyani]: ...", "[Speaker 1]: ...").
-   - If speaker names are already tagged in the input (e.g. "[Shoaib Shah]: ..."), preserve those exact names faithfully.
-   - If the transcript is untagged dialogue, attribute speaker turns to the authentic participants in the call:
-${participantsList.length > 0 ? participantsList.map(p => `     - ${p}`).join('\n') : '     - Identify separate speakers (e.g. [Speaker 1], [Speaker 2], [Host]) based on dialogue turns.'}
-   - NEVER drop speaker names or output plain text paragraphs without "[Speaker]:" tags.
+MANDATORY RULES — VIOLATING ANY IS UNACCEPTABLE:
 
-2. AUTHENTIC URDU LANGUAGE (ABSOLUTELY NO ARABIC):
-   - Spoken language is URDU (اردو) / URDISH and English.
-   - NEVER output Arabic greetings like "مرحبا" or "بارک اللہ". Use standard Urdu ("السلام علیکم", "ہیلو", "جی ٹھیک ہے", "کیا حال ہے").
-   - Transcribe Urdu speech cleanly into Urdu script (نستعلیق / اردو رسم الخط). Keep technical loan words natural (e.g. "یو آئی", "بٹن", "اپ ڈیٹ", "اسکرین شیئر", "ٹیسٹ", "گٹ", "کمانڈ").
+1. ZERO HALLUCINATION:
+   - Transcribe ONLY what is in the input. Do NOT add sentences, words, or ideas not present.
+   - If the input is short (even 1-2 sentences), output only those sentences — do not pad or fabricate.
+   - NEVER generate fictional meeting content. If the input says "And practice it and get up preferably" — that is the full content, nothing more.
 
-3. DIALOGUE FORMAT (MANDATORY):
-   - Urdu transcript (transcript_urdu):
-     "[Speaker Name]: [Urdu dialogue in Urdu script]"
-   - English transcript (transcript_english):
-     "[Speaker Name]: [Accurate, polished English translation of the dialogue]"
+2. SPEAKER ATTRIBUTION (EVERY LINE):
+   - EVERY line in transcript_urdu and transcript_english MUST start with "[Speaker Name]: ".
+   - Preserve speaker names from the input exactly (e.g. [Bisma Abbasi]: → keep as [Bisma Abbasi]:).
+   - If no speaker name is in the input, use participant names from the verified list above.
 
-4. CONCRETE ACTION ITEMS:
-   - Extract real decisions, commitments, tasks, and bugs discussed in the meeting.
-   - Format: "• [Responsible Person]: [Specific action item description]"
-   - If no actionable tasks were assigned:
-     Urdu: "• کوئی مخصوص ٹاسک یا ایکشن آئٹم تفویض نہیں ہوا۔"
-     English: "• No specific action items were assigned."
+3. AUTHENTIC URDU (NOT ARABIC):
+   - Language is Pakistani/Indian URDU (اردو رسم الخط / نستعلیق), NOT Arabic.
+   - Use: السلام علیکم, ہیلو, جی, ٹھیک ہے, کیا حال ہے, آپ, ہم, وہ
+   - NEVER use Arabic-only greetings: مرحبا, بارک اللہ, جزاک اللہ
+   - Technical English words stay natural in Urdu: "اپ ڈیٹ", "بٹن", "اسکرین شیئر", "ڈیٹا"
 
-5. SILENCE / EMPTY HANDLING:
-   - If the captions contain no substantive speech, return clean empty messages without hallucination.
+4. TRANSLATE, DON'T TRANSCRIBE FOR ENGLISH:
+   - transcript_urdu = the spoken Urdu/English dialogue written in Urdu script.
+   - transcript_english = a clean, accurate English translation of transcript_urdu.
 
-OUTPUT JSON SCHEMA:
+5. ACTION ITEMS — CONCRETE ONLY:
+   - Extract real, specific tasks/decisions assigned to named people.
+   - Format: "• [Person Name]: [Specific task]"
+   - If genuinely no action items exist: "• No specific action items were identified."
+   - DO NOT invent tasks.
+
+OUTPUT JSON (strict schema, no extra keys):
 {
-  "transcript_urdu": "Full speaker-wise dialogue in Urdu script with [Speaker Name]: on every line.",
-  "transcript_english": "Full speaker-wise dialogue translation in English with [Speaker Name]: on every line.",
-  "action_items_urdu": "Bullet-pointed tasks with assigned person names in Urdu.",
-  "action_items_english_improved": "Polished business English action items with assigned person names."
+  "transcript_urdu": "Speaker-attributed Urdu dialogue. Every line: [Name]: text",
+  "transcript_english": "Speaker-attributed English translation. Every line: [Name]: text",
+  "action_items_urdu": "Bullet list of real tasks in Urdu, or empty state",
+  "action_items_english_improved": "Bullet list of real tasks in English, or empty state"
 }`;
 
   let lastError = null;
@@ -160,13 +157,13 @@ OUTPUT JSON SCHEMA:
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
-          temperature: 0.1,
+          temperature: 0.0,
           responseMimeType: 'application/json'
         },
         systemInstruction: systemInstruction
       });
 
-      const prompt = `Here are the verbatim Google Meet closed captions recorded during the meeting:\n\n${rawTranscript}\n\nConvert into full bilingual dialogue transcripts and action items in JSON adhering strictly to the schema.`;
+      const prompt = `Below are the verbatim Google Meet closed captions from a real meeting. Format them faithfully into bilingual transcripts and action items. Do NOT add, remove, or change any spoken content.\n\n---\n${rawTranscript}\n---\n\nReturn JSON only.`;
       const result = await model.generateContent(prompt);
       const response = await result.response;
       const responseText = response.text().trim();
