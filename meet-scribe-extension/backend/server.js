@@ -97,11 +97,10 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
   const userConfiguredModel = process.env.GEMINI_MODEL;
   const modelCandidates = [
     ...(userConfiguredModel ? [userConfiguredModel] : []),
-    'gemini-2.5-flash-preview-05-20',  // Latest stable preview
-    'gemini-3.6-flash',                // Recommended replacement for 2.5-flash
-    'gemini-3.5-flash-lite',           // Recommended replacement for 2.5-flash-lite
-    'gemini-2.5-flash-preview-04-17',  // Older preview fallback
-    'gemini-2.5-pro-preview-05-06',    // Pro fallback
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+    'gemini-2.0-flash-lite'
   ];
 
   const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
@@ -392,10 +391,9 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
       const fileBuffer = fs.readFileSync(filePath);
       const base64Audio = fileBuffer.toString('base64');
       const audioModelCandidates = [
-        'gemini-2.5-flash-preview-05-20',
-        'gemini-3.6-flash',
+        'gemini-2.0-flash',
         'gemini-1.5-flash',
-        'gemini-2.5-pro-preview-05-06'
+        'gemini-1.5-pro'
       ];
 
       for (const modelName of audioModelCandidates) {

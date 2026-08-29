@@ -196,16 +196,17 @@ async function startRecording(streamId, initialMuteState = false) {
     activeMicGainNode.connect(compressor);
   }
 
+  destinationNode.channelCount = 1;
   mediaStream = destinationNode.stream;
 
-  // 4. Initialize MediaRecorder (128kbps Opus WebM for studio-clear audio)
+  // 4. Initialize MediaRecorder (32kbps Opus WebM voice-optimized for Vercel/cloud payloads)
   const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
     ? 'audio/webm;codecs=opus'
     : 'audio/webm';
 
   mediaRecorder = new MediaRecorder(mediaStream, {
     mimeType: mimeType,
-    audioBitsPerSecond: 128000 // 128kbps high definition
+    audioBitsPerSecond: 32000 // 32kbps voice-optimized (reduces 5-min audio to ~1.1MB, safely below Vercel's 4.5MB limit)
   });
 
   mediaRecorder.ondataavailable = (event) => {
@@ -215,7 +216,7 @@ async function startRecording(streamId, initialMuteState = false) {
   };
 
   mediaRecorder.start(1000);
-  console.log(`[Offscreen] Crystal-clear audio recorder started (Opus 128kbps, AEC + Noise Suppression active).`);
+  console.log(`[Offscreen] Crystal-clear voice recorder started (Opus 32kbps mono, AEC + Noise Suppression active).`);
 }
 
 // Stop recording and immediately download local 0_meeting_audio.webm before AI calls

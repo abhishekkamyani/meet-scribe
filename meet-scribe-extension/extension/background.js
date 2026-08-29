@@ -321,14 +321,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             throw new Error((audioRes && audioRes.error) || 'Audio AI returned no data');
           }
         } catch (audioErr) {
-          console.warn('[Background] Primary audio AI processing failed, attempting captions fallback:', audioErr.message);
-          structuredData = await postCaptionsToBackend({
-            transcript: captionsData.rawTranscript || '',
-            utterances: captionsData.utterances || [],
-            participants: participants,
-            geminiApiKey: geminiApiKey,
-            groqApiKey: groqApiKey
-          });
+          console.warn('[Background] Primary audio AI processing failed:', audioErr.message);
+          if (captionsData && captionsData.rawTranscript && captionsData.rawTranscript.trim().length > 0) {
+            console.log('[Background] Attempting captions fallback...');
+            structuredData = await postCaptionsToBackend({
+              transcript: captionsData.rawTranscript,
+              utterances: captionsData.utterances || [],
+              participants: participants,
+              geminiApiKey: geminiApiKey,
+              groqApiKey: groqApiKey
+            });
+          } else {
+            throw new Error(`AI Processing Failed: ${audioErr.message}. Ensure your Gemini API Key is entered in Settings (⚙️) or backend .env.`);
+          }
         }
 
         // Step 4: Download the 4 UTF-8 text files to the same meeting folder
