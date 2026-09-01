@@ -131,10 +131,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         await chrome.storage.local.set({ recordingState: 'starting' });
 
-        // C1 fix: query by URL, not by active tab in current window — popup being open would
-        // cause active:true/currentWindow:true to return the popup context instead of Meet.
-        const meetTabs = await chrome.tabs.query({ url: '*://meet.google.com/*' });
-        const tab = meetTabs[0];
+        // C1 fix: Use the active tab ID passed from the popup. If not provided, fallback to querying.
+        // This ensures activeTab permissions are properly granted for tabCapture.
+        let tab;
+        if (message.tabId) {
+          tab = await chrome.tabs.get(message.tabId);
+        } else {
+          const meetTabs = await chrome.tabs.query({ url: '*://meet.google.com/*' });
+          tab = meetTabs[0];
+        }
+        
         if (!tab || !tab.url || !tab.url.includes('meet.google.com')) {
           await chrome.storage.local.set({ recordingState: 'idle' });
           sendResponse({

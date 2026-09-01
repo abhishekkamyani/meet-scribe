@@ -76,6 +76,7 @@ let activeTabType = 'ur-trans';
 let userGroqKey = '';
 let userGeminiKey = '';
 let activeBackendUrl = 'http://localhost:3001';
+let activeMeetTabId = null;
 
 // Request / Verify Microphone Permission
 async function ensureMicrophonePermission(interactive = false) {
@@ -167,6 +168,7 @@ async function checkActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab && tab.url && tab.url.includes('meet.google.com')) {
+      activeMeetTabId = tab.id;
       elements.activeTabTitle.textContent = tab.title || 'Google Meet';
       elements.notMeetAlert.classList.add('hidden');
       elements.meetDetectedBadge.textContent = 'Meet Ready';
@@ -209,6 +211,7 @@ async function checkActiveTab() {
       }
 
     } else {
+      activeMeetTabId = null;
       elements.activeTabTitle.textContent = tab ? (tab.title || 'Non-Meet Tab') : 'No tab detected';
       elements.notMeetAlert.classList.remove('hidden');
       elements.meetDetectedBadge.textContent = 'Not Meet';
@@ -433,7 +436,8 @@ function setupEventListeners() {
     elements.startRecordingBtn.querySelector('span:last-child').textContent = 'Starting…';
 
     chrome.runtime.sendMessage({
-      type: 'START_RECORDING'
+      type: 'START_RECORDING',
+      tabId: activeMeetTabId
     }, (response) => {
       elements.startRecordingBtn.disabled = false;
       elements.startRecordingBtn.querySelector('span:last-child').textContent = 'Start Meeting Recording';
