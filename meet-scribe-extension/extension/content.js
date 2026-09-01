@@ -212,8 +212,7 @@ function cleanCloneForText(clone) {
   // Remove aria-hidden nodes (icon fonts always mark themselves aria-hidden)
   clone.querySelectorAll('[aria-hidden="true"]').forEach(el => el.remove());
   // Remove Material Icon text explicitly (they leak as text like "arrow_downward", "close", etc.)
-  clone.querySelectorAll('.material-icons, .material-symbols-outlined, .material-symbols-rounded,
-    [class*="material-icon"], [class*="google-material"]').forEach(el => el.remove());
+  clone.querySelectorAll('.material-icons, .material-symbols-outlined, .material-symbols-rounded, [class*="material-icon"], [class*="google-material"]').forEach(el => el.remove());
   // Remove speaker name elements
   clone.querySelectorAll('.zs75Ib, .NW0r5c, .jxFHg, .KcIKyf, img').forEach(el => el.remove());
   // Remove any element that looks like an icon keyword (short all-lowercase word that's a known icon name)
@@ -236,7 +235,7 @@ function extractTextFromBlock(block) {
       const parts = Array.from(spans).map(s => {
         const c = s.cloneNode(true);
         cleanCloneForText(c);
-        return (c.innerText || '').trim();
+        return (c.innerText || c.textContent || '').trim();
       }).filter(Boolean);
       const txt = parts.join(' ').replace(/\s+/g, ' ').trim();
       if (txt.length > 0) return txt;
@@ -246,11 +245,11 @@ function extractTextFromBlock(block) {
   // Fallback: clone the block, remove noise, read remaining text
   const clone = block.cloneNode(true);
   cleanCloneForText(clone);
-  const txt = (clone.innerText || '').replace(/\s+/g, ' ').trim();
+  const txt = (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
   if (txt.length > 0) return txt;
 
   // Last resort: raw innerText stripped of known icon strings
-  return (block.innerText || '')
+  return (block.innerText || block.textContent || '')
     .replace(/arrow_downward|arrow_upward|Jump to bottom|Jump to top|expand_more|expand_less|close|more_vert/gi, '')
     .replace(/\s+/g, ' ').trim();
 }

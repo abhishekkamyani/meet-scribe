@@ -26,16 +26,21 @@ async function ensureOffscreenDocument() {
     if (existingContexts.length > 0) return;
   }
 
-  await chrome.offscreen.createDocument({
-    url: OFFSCREEN_DOCUMENT_PATH,
-    reasons: [chrome.offscreen.Reason.USER_MEDIA],
-    justification: 'Recording Google Meet audio for local meeting backup'
-  });
+  try {
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_DOCUMENT_PATH,
+      reasons: [chrome.offscreen.Reason.USER_MEDIA],
+      justification: 'Recording Google Meet audio for local meeting backup'
+    });
+  } catch (err) {
+    if (!err.message || !err.message.includes('Only a single offscreen document may be created')) {
+      throw err;
+    }
+  }
 }
 
 // Download 4 structured text files to the meeting folder
 async function downloadTextFilesToFolder(folderName, data) {
-  const utf8BOM = 'data:text/plain;charset=utf-8,\uFEFF';
   const files = [
     { name: '1_transcript_urdu.txt', content: data.transcript_urdu || '' },
     { name: '2_transcript_english.txt', content: data.transcript_english || '' },
@@ -44,7 +49,7 @@ async function downloadTextFilesToFolder(folderName, data) {
   ];
 
   for (const file of files) {
-    const encodedUri = utf8BOM + encodeURIComponent(file.content);
+    const encodedUri = 'data:text/plain;charset=utf-8,' + encodeURIComponent('\uFEFF' + (file.content || ''));
     const fullPath = folderName ? `${folderName}/${file.name}` : file.name;
 
     try {
