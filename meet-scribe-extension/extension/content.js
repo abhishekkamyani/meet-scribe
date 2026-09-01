@@ -223,6 +223,8 @@ function cleanCloneForText(clone) {
 }
 
 function extractTextFromBlock(block) {
+  let finalTxt = '';
+
   // Try known spoken-text span selectors first (most precise)
   const TEXT_SELECTORS = [
     'span.VbkSUe', 'span[jsname="VbkSUe"]', 'span.iTTPOb',
@@ -237,21 +239,28 @@ function extractTextFromBlock(block) {
         cleanCloneForText(c);
         return (c.innerText || c.textContent || '').trim();
       }).filter(Boolean);
-      const txt = parts.join(' ').replace(/\s+/g, ' ').trim();
-      if (txt.length > 0) return txt;
+      finalTxt = parts.join(' ').replace(/\s+/g, ' ').trim();
+      if (finalTxt.length > 0) break;
     }
   }
 
   // Fallback: clone the block, remove noise, read remaining text
-  const clone = block.cloneNode(true);
-  cleanCloneForText(clone);
-  const txt = (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
-  if (txt.length > 0) return txt;
+  if (!finalTxt) {
+    const clone = block.cloneNode(true);
+    cleanCloneForText(clone);
+    finalTxt = (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim();
+  }
 
-  // Last resort: raw innerText stripped of known icon strings
-  return (block.innerText || block.textContent || '')
+  // Last resort: raw innerText
+  if (!finalTxt) {
+    finalTxt = (block.innerText || block.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Globally strip known Google Meet UI strings that leak into the DOM as text
+  return finalTxt
     .replace(/arrow_downward|arrow_upward|Jump to bottom|Jump to top|expand_more|expand_less|close|more_vert/gi, '')
-    .replace(/\s+/g, ' ').trim();
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /* ── Main Captions Scraper ───────────────────────────────────────────────── */
