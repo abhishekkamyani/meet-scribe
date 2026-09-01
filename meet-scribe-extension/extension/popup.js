@@ -427,6 +427,16 @@ function setupEventListeners() {
 
   // Start Recording
   elements.startRecordingBtn.addEventListener('click', async () => {
+    // Early validation: ensure both API keys are provided for BYOK
+    if (!userGeminiKey || !userGroqKey) {
+      showView('error');
+      elements.errorMessageText.textContent = 'Please enter both your Gemini and Groq API keys in the Settings (⚙️) before starting a recording.';
+      elements.settingsPanel.classList.remove('hidden');
+      if (!userGeminiKey) elements.geminiApiKeyInput.focus();
+      else elements.groqApiKeyInput.focus();
+      return;
+    }
+
     const micGranted = await ensureMicrophonePermission(true);
     if (!micGranted) return;
 
