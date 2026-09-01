@@ -151,16 +151,13 @@ function findCaptionContainer() {
     '[aria-live="polite"][aria-atomic="false"]'
   ]) {
     const el = document.querySelector(sel);
-    if (el && (el.innerText || '').trim().length > 1) return el;
+    if (el && (el.innerText || '').trim().length > 1) {
+      // Ensure we don't accidentally grab a tiny notification toast instead of the main CC panel
+      const r = el.getBoundingClientRect();
+      if (r.width > 200) return el; 
+    }
   }
 
-  // Layer 3: Any aria-live in lower portion of screen
-  for (const el of document.querySelectorAll('[aria-live]')) {
-    const txt = (el.innerText || '').trim();
-    if (txt.length < 2) continue;
-    const r = el.getBoundingClientRect();
-    if (r.top > window.innerHeight * 0.35) return el;
-  }
   return null;
 }
 
