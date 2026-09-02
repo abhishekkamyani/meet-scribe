@@ -116,31 +116,26 @@ ${participantsHint}
 
 MANDATORY RULES — VIOLATING ANY IS UNACCEPTABLE:
 
-1. ZERO HALLUCINATION:
+1. ZERO HALLUCINATION & STRICT ATTRIBUTION:
    - Transcribe ONLY what is in the input. Do NOT add sentences, words, or ideas not present.
-   - If the input is short (even 1-2 sentences), output only those sentences — do not pad or fabricate.
-   - NEVER generate fictional meeting content. If the input says "And practice it and get up preferably" — that is the full content, nothing more.
+   - EVERY line MUST start with a speaker name (e.g. "[Speaker Name]: ").
+   - If speaker names ARE in the input, preserve them exactly.
+   - CRITICAL: If the input lacks speaker names (e.g. a raw audio transcript), DO NOT GUESS OR INVENT NAMES from the participant list. Simply use "[Speaker]:" or "[Speaker 1]:", "[Speaker 2]:" based on conversation flow. 
 
-2. SPEAKER ATTRIBUTION (EVERY LINE):
-   - EVERY line in transcript_urdu and transcript_english MUST start with "[Speaker Name]: ".
-   - Preserve speaker names from the input exactly (e.g. [Bisma Abbasi]: → keep as [Bisma Abbasi]:).
-   - If no speaker name is in the input, use participant names from the verified list above.
-
-3. AUTHENTIC URDU (NOT ARABIC):
+2. AUTHENTIC & PROFESSIONAL URDU:
    - Language is Pakistani/Indian URDU (اردو رسم الخط / نستعلیق), NOT Arabic.
    - Use: السلام علیکم, ہیلو, جی, ٹھیک ہے, کیا حال ہے, آپ, ہم, وہ
-   - NEVER use Arabic-only greetings: مرحبا, بارک اللہ, جزاک اللہ
    - Technical English words stay natural in Urdu: "اپ ڈیٹ", "بٹن", "اسکرین شیئر", "ڈیٹا"
+   - FORMATTING: Ensure the Urdu text is well-formatted with proper punctuation (ختمہ، سکتہ), clear sentence breaks, and readable paragraphs. Do not output a giant wall of text.
 
-4. TRANSLATE, DON'T TRANSCRIBE FOR ENGLISH:
+3. TRANSLATE, DON'T TRANSCRIBE FOR ENGLISH:
    - transcript_urdu = the spoken Urdu/English dialogue written in Urdu script.
-   - transcript_english = a clean, accurate English translation of transcript_urdu.
+   - transcript_english = a clean, accurate, and professional English translation of transcript_urdu.
 
-5. ACTION ITEMS — CONCRETE ONLY:
+4. ACTION ITEMS — CONCRETE ONLY:
    - Extract real, specific tasks/decisions assigned to named people.
    - Format: "• [Person Name]: [Specific task]"
    - If genuinely no action items exist: "• No specific action items were identified."
-   - DO NOT invent tasks.
 
 OUTPUT JSON (strict schema, no extra keys):
 {
@@ -375,7 +370,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
           model: 'whisper-large-v3',
           response_format: 'verbose_json',
           temperature: 0.0,
-          prompt: `Meeting conversation between ${participantsList.join(', ') || 'participants'} in Urdu and English.`
+          prompt: `A professional meeting conversation in Urdu and English. The audio may contain silence, please ignore silence and only transcribe speech.`
         });
         rawText = transcription.text ? transcription.text.trim() : '';
       } catch (whisperErr) {
