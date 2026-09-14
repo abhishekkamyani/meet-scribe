@@ -74,24 +74,25 @@ The backend will start at `http://localhost:3000`.
 4. Speak normally in Urdu, English, or mixed Urdish.
 5. When finished, click **"Stop & Process Notes"**.
 6. MeetScribe will:
-   - **Immediately download `0_meeting_audio.webm` to your `Downloads` folder** (Audio is kept 100% private and never uploaded to any cloud server).
-   - Extract the authentic speaker-tagged captions from Google Meet.
-   - Send the captions text to the Express backend for Gemini structuring and translation.
+   - **Download `0_meeting_audio.webm` directly to your `Downloads` folder** for local preservation.
+   - Stream the audio recording to the Express backend for Gemini Multimodal Audio processing.
+   - Generate plain bilingual transcripts and action items strictly excluding speaker names.
    - Automatically save 4 organized UTF-8 text files to the meeting folder:
      ```text
      Downloads/MeetScribe_Urdu/Meeting_YYYY-MM-DD_HH-MM/
      ├── 0_meeting_audio.webm              # Full local audio recording
-     ├── 1_transcript_urdu.txt             # Verified speaker Urdu transcript (UTF-8 BOM)
-     ├── 2_transcript_english.txt          # Verified speaker English translation
-     ├── 3_action_items_urdu.txt           # Urdu action items with assigned owners
-     └── 4_action_items_english_improved.txt # Business English action items
+     ├── 1_transcript_urdu.txt             # Plain Urdu transcript without speaker names (UTF-8 BOM)
+     ├── 2_transcript_english.txt          # Plain English translation without speaker names
+     ├── 3_action_items_urdu.txt           # Urdu action items without person names
+     └── 4_action_items_english_improved.txt # Business English action items without person names
      ```
 
 ---
 
 ## ⚙️ Key Technical Highlights
 
-- **100% Ground-Truth Speaker Attribution**: By extracting Google Meet's WebRTC-stamped Closed Captions, attendee names (e.g. `Shoaib Shah`, `Abhishek Kamyani`) are authentic and never hallucinated by AI models.
-- **Local Audio Privacy**: The full `.webm` Opus audio is saved directly to your computer *before* AI processing. Zero audio bytes are sent over the network.
+- **Direct Multimodal Audio AI**: Generates complete bilingual notes directly from the recorded audio using Gemini Audio AI, avoiding fragile DOM caption scraping.
+- **Plain Content (No Speaker Names)**: All transcripts and action items are clean, continuous plain content with no speaker labels or person prefixes.
+- **Local Audio Preservation**: The full `.webm` Opus audio is saved directly to your computer's `Downloads` folder.
 - **Express Backend with Auth Scaffolding**: Provides clean separation of concerns, secure API key handling, and ready-to-use auth scaffolding (`/api/auth`) for future Google/Email user sign-in.
 - **Anti-Arabic Urdu Guardrails**: Strict prompt engineering ensures natural Pakistani/Indian corporate vocabulary (`ہیلو`, `السلام علیکم`, `اپ ڈیٹ`, `بٹن`, `پیج`, `ٹیسٹ`).

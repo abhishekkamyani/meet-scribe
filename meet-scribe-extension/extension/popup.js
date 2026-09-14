@@ -560,14 +560,4 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 
-// Listen for direct messages from background (e.g. CC warnings during recording)
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'CAPTIONS_NOT_DETECTED') {
-    // Show a warning in the recording view's timer subtext
-    const timerSubtext = document.querySelector('.timer-subtext');
-    if (timerSubtext) {
-      timerSubtext.textContent = '⚠️ Captions not detected — please enable CC in Meet to get transcript';
-      timerSubtext.style.color = '#fbbf24';
-    }
-  }
-});
+

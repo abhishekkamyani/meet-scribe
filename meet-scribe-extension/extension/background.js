@@ -150,37 +150,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        // 2. Inject content script programmatically to guarantee latest version is running.
-        // Manifest content_scripts only inject at page-load time, so if Meet was already open
-        // (before extension install or after a reload), content.js was never there.
-        // chrome.scripting.executeScript fixes this — the guard in content.js handles re-injection safely.
+        // 2. Inject content script programmatically to detect mic state
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             files: ['content.js']
           });
-          console.log('[Background] content.js injected into Meet tab successfully.');
-          // Brief pause to let the script initialize before we message it
-          await new Promise(r => setTimeout(r, 400));
+          console.log('[Background] content.js initialized in Meet tab.');
+          await new Promise(r => setTimeout(r, 200));
         } catch (injectErr) {
-          console.warn('[Background] Could not inject content.js (may not have scripting permission or tab is restricted):', injectErr.message);
+          console.warn('[Background] Could not inject content.js:', injectErr.message);
         }
 
-        // 3. Start Captions capture in Google Meet tab (auto-enables CC and starts DOM observer)
-        try {
-          const captureRes = await chrome.tabs.sendMessage(tab.id, { type: 'START_CAPTIONS_CAPTURE' });
-          if (captureRes && captureRes.success) {
-            console.log('[Background] START_CAPTIONS_CAPTURE confirmed by content script.');
-          } else {
-            console.warn('[Background] START_CAPTIONS_CAPTURE: unexpected response', captureRes);
-          }
-        } catch (captionsErr) {
-          // Content script not yet injected (e.g. page still loading) — recording continues, captions optional
-          console.warn('[Background] Could not initialize captions on tab (content script may not be ready):', captionsErr.message);
-        }
-
-
-        // 4. Acquire tab audio stream ID
+        // 3. Acquire tab audio stream ID
         const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
         if (!streamId) {
           throw new Error('Failed to acquire tabCapture stream ID.');
@@ -226,17 +208,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }).catch(() => {});
         sendResponse({ received: true });
 
-      } else if (message.type === 'CAPTIONS_NOT_DETECTED') {
-        // Content script warns that CC is not active 4s into recording
-        // Forward to popup so user sees an actionable warning
-        await chrome.storage.local.set({
-          processingStep: '⚠️ Google Meet Captions not detected. Please enable CC in Meet (button at the bottom of the screen).'
-        });
-        chrome.runtime.sendMessage({
-          type: 'CAPTIONS_NOT_DETECTED'
-        }).catch(() => {});
-        sendResponse({ received: true });
-
       } else if (message.type === 'STOP_RECORDING') {
         await chrome.storage.local.set({
           recordingState: 'processing',
@@ -246,7 +217,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.action.setBadgeBackgroundColor({ color: '#3B82F6' });
 
         // Step 1: Stop offscreen audio recorder and trigger INSTANT local 0_meeting_audio.webm download
-        // C2 fix: wrap with a timeout so a crashed/missing offscreen document never hangs STOP_RECORDING forever
         let folderName = '';
         try {
           const offscreenRes = await Promise.race([
@@ -267,44 +237,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           folderName = `MeetScribe_Urdu/Meeting_${dateStr}_${timeStr}`;
         }
 
-        // Step 2: Retrieve ground-truth speaker captions from Google Meet content script
+        // Step 2: Send audio recording directly to Express / Gemini Audio AI backend
         await chrome.storage.local.set({
-          processingStep: 'Extracting verified speaker captions from Google Meet...'
-        });
-
-        let captionsData = { rawTranscript: '', utterances: [], participants: [] };
-
-        // IMPORTANT: Always use the stored activeTabId (saved when recording started).
-        // Do NOT use chrome.tabs.query({ active: true, currentWindow: true }) as the primary source —
-        // when the popup is open, that query returns the popup's window context, not the Meet tab.
-        const { activeTabId: storedTabId } = await chrome.storage.local.get('activeTabId');
-        let targetTabId = storedTabId;
-
-        // Fallback: if stored ID is missing, search all tabs for an active Google Meet tab
-        if (!targetTabId) {
-          const meetTabs = await chrome.tabs.query({ url: '*://meet.google.com/*' });
-          if (meetTabs.length > 0) {
-            targetTabId = meetTabs[0].id;
-            console.warn('[Background] activeTabId not in storage, falling back to Meet tab search:', targetTabId);
-          }
-        }
-
-        if (targetTabId) {
-          try {
-            const capRes = await chrome.tabs.sendMessage(targetTabId, { type: 'STOP_CAPTIONS_CAPTURE' });
-            if (capRes && capRes.success) {
-              captionsData = capRes;
-            }
-          } catch (capErr) {
-            console.warn('[Background] Could not retrieve captions from content script:', capErr.message);
-          }
-        } else {
-          console.warn('[Background] Could not determine target Meet tab ID to retrieve captions.');
-        }
-
-        // Step 3: Transcribe and Structure Meeting with High-Definition Audio AI Engine
-        await chrome.storage.local.set({
-          processingStep: 'Transcribing audio and attributing speakers with AI...'
+          processingStep: 'Sending audio recording to AI for plain notes & action items...'
         });
 
         const storageData = await chrome.storage.local.get(['geminiApiKey', 'groqApiKey', 'backendUrl']);
@@ -312,53 +247,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const groqApiKey = storageData.groqApiKey || '';
         const activeUrl = storageData.backendUrl || 'http://localhost:3001';
 
+        console.log('[Background] Processing meeting audio recording directly with AI backend...');
         let structuredData = null;
-        const participants = captionsData.participants || [];
-        const hasLiveCaptions = Boolean(captionsData && captionsData.rawTranscript && captionsData.rawTranscript.trim().length > 10);
+        try {
+          const audioRes = await chrome.runtime.sendMessage({
+            type: 'PROCESS_AUDIO',
+            backendUrl: activeUrl,
+            geminiApiKey: geminiApiKey,
+            groqApiKey: groqApiKey
+          });
 
-        // 1. Prefer ground-truth Closed Captions directly from Google Meet if available (100% accurate speaker names & zero AI audio hallucination)
-        if (hasLiveCaptions) {
-          try {
-            console.log(`[Background] Processing ground-truth Google Meet captions (${captionsData.rawTranscript.length} chars)...`);
-            structuredData = await postCaptionsToBackend({
-              transcript: captionsData.rawTranscript,
-              utterances: captionsData.utterances || [],
-              participants: participants,
-              geminiApiKey: geminiApiKey,
-              groqApiKey: groqApiKey
-            });
-            console.log('[Background] Ground-truth captions processing successful ✓');
-          } catch (capErr) {
-            console.warn('[Background] Live captions processing failed, attempting audio fallback:', capErr.message);
+          if (audioRes && audioRes.success && audioRes.data) {
+            structuredData = audioRes.data;
+            console.log('[Background] Audio AI processing successful ✓');
+          } else {
+            throw new Error((audioRes && audioRes.error) || 'Audio AI returned no data');
           }
+        } catch (audioErr) {
+          // Don't bolt on a generic "check your API key" hint when the real cause is
+          // something else (payload size, connectivity) — it sends users troubleshooting
+          // the wrong thing.
+          const msg = audioErr.message || 'Unknown error';
+          let hint = '';
+          if (/too large|4\.5mb|payload/i.test(msg)) {
+            hint = ' Run the backend locally for full-length meetings, or keep recordings under ~15-18 minutes when using the free cloud backend.';
+          } else if (/could not reach|could not connect|fetch|network/i.test(msg)) {
+            hint = ' Please ensure the backend is running (npm start in the backend folder) or that your internet connection is working.';
+          } else if (/api key|unauthorized|permission|quota/i.test(msg)) {
+            hint = ' Please verify your Gemini API Key in Settings (⚙️).';
+          }
+          throw new Error(`AI Processing Failed: ${msg}.${hint}`);
         }
 
-        // 2. Audio Processing (if captions were not active or failed)
-        if (!structuredData) {
-          try {
-            console.log(`[Background] Processing audio recording with attendees: ${participants.join(', ') || 'Call Participants'}`);
-            const audioRes = await chrome.runtime.sendMessage({
-              type: 'PROCESS_AUDIO_FALLBACK',
-              backendUrl: activeUrl,
-              geminiApiKey: geminiApiKey,
-              groqApiKey: groqApiKey,
-              participants: participants
-            });
-
-            if (audioRes && audioRes.success && audioRes.data) {
-              structuredData = audioRes.data;
-              console.log('[Background] Audio AI processing successful ✓');
-            } else {
-              throw new Error((audioRes && audioRes.error) || 'Audio AI returned no data');
-            }
-          } catch (audioErr) {
-            throw new Error(`AI Processing Failed: ${audioErr.message}. Please verify your Gemini API Key in Settings (⚙️).`);
-          }
-        }
-
-        // Step 4: Download the 4 UTF-8 text files to the same meeting folder
+        // Step 3: Download the 4 plain UTF-8 text files to the same meeting folder
         await chrome.storage.local.set({
-          processingStep: 'Saving 4 structured notes files to Downloads...'
+          processingStep: 'Saving 4 plain notes files to Downloads...'
         });
 
         await downloadTextFilesToFolder(folderName, structuredData);

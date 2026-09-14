@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **MeetScribe Urdu** is a Chrome Manifest V3 extension + Express.js backend that captures Google Meet live captions and tab audio, then uses Google Gemini AI (with Groq Whisper as fallback) to generate bilingual Urdu/English meeting notes — strictly without speaker names.
 
+# Claude Code Rules
+
+## Token & Credit Management
+- **Remember: Use less number of credits.**
+- **Diffs only:** Never rewrite an entire file if you are only changing a few lines.
+- **Strict tool efficiency:** Run the minimum number of terminal commands or file reads necessary to complete the task.
+
+
 ## Running the Backend
 
 ```bash

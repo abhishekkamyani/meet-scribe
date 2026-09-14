@@ -54,40 +54,54 @@ async function processLatestRecording() {
 
   let rawDialogue = '';
 
-  // Strategy 1: Groq Whisper
-  if (hasGroq) {
-    try {
-      console.log('⚡ Transcribing with Groq Whisper Large v3...');
-      const groq = new Groq({ apiKey: groqKey });
-      const transcription = await groq.audio.transcriptions.create({
-        file: fs.createReadStream(audioPath),
-        model: 'whisper-large-v3',
-        response_format: 'verbose_json',
-        temperature: 0.0,
-        prompt: 'Urdu and English corporate meeting conversation between participants.'
-      });
-      rawDialogue = transcription.text ? transcription.text.trim() : '';
-    } catch (e) {
-      console.warn('⚠️ Groq Whisper failed:', e.message);
-    }
-  }
-
-  // Strategy 2: Gemini Audio
-  if (!rawDialogue && hasGemini) {
+  // Strategy 1: Gemini Audio (Native Urdu speech, ML technical vocabulary, acoustic diarization)
+  if (hasGemini) {
     const genAI = new GoogleGenerativeAI(geminiKey);
     const fileBuffer = fs.readFileSync(audioPath);
     const base64Audio = fileBuffer.toString('base64');
-    const audioModels = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+    const audioModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+
+function stripSpeakerTags(str) {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/^\uFEFF/, '')
+    .replace(/^\[?\s*(?:Speaker(?:\s*\d+)?|Participant(?:\s*\d+)?|Person(?:\s*\d+)?|User|Host|Attendee|Unknown|You|آپ|مقرر|بولنے\s*والا|[^\]:\n]{1,40})\s*\]?\s*:\s*/gim, '')
+    .replace(/\n\[?\s*(?:Speaker(?:\s*\d+)?|Participant(?:\s*\d+)?|Person(?:\s*\d+)?|User|Host|Attendee|Unknown|You|آپ|مقرر|بولنے\s*والا|[^\]:\n]{1,40})\s*\]?\s*:\s*/gim, '\n')
+    .replace(/•\s*\[?\s*(?:Speaker(?:\s*\d+)?|Participant|Person|User|Host|Attendee|Unknown|You|آپ|[^\]]+)\s*\]?\s*:\s*/gim, '• ')
+    .replace(/\[?Speaker(?:\s*\d+)?\]?\s*:\s*/gi, '')
+    .replace(/\[Speaker\]/gi, '')
+    .trim();
+}
+
+function sanitizePlainMeetingNotes(data) {
+  if (!data || typeof data !== 'object') return data;
+  return {
+    transcript_urdu: stripSpeakerTags(data.transcript_urdu),
+    transcript_english: stripSpeakerTags(data.transcript_english),
+    action_items_urdu: stripSpeakerTags(data.action_items_urdu),
+    action_items_english_improved: stripSpeakerTags(data.action_items_english_improved)
+  };
+}
 
     for (const modelName of audioModels) {
       try {
         console.log(`✨ Transcribing with Google Gemini Audio (${modelName})...`);
-        const model = genAI.getGenerativeModel({ model: modelName });
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          systemInstruction: `You are an expert bilingual speech-to-text transcriber for Pakistani/Indian Urdu and English (Urdish).
+Listen to the audio recording and transcribe all spoken content verbatim.
+Strict rules:
+1. Strictly DO NOT include any speaker names, labels, or tags (no [Speaker]:, [Speaker 1]:, etc.). Provide plain continuous dialogue.
+2. Accurately transcribe modern software, web development, UI/UX, and technical terms in natural script or English:
+   - UI, UX, responsive, mobile, desktop, screens, frontend, backend, layout, components, CSS, buttons, dashboard, API, bugs.
+   - Machine learning: SimpleImputer, Pipeline, ColumnTransformer, Cross Validation, mean, null values.
+3. Preserve authentic Urdu grammar and natural paragraph breaks.`
+        });
         const result = await model.generateContent([
-          `Please listen to this meeting audio recording and transcribe all spoken Urdu and English dialogue verbatim.
-Identify and attribute distinct speakers (e.g. [Speaker 1], [Speaker 2], [Host]).
-Format:
-[Speaker Name]: [Spoken dialogue]`,
+          `Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English dialogue verbatim.
+Strictly do NOT include any speaker names, labels, or speaker tags.
+Preserve all technical vocabulary (UI, UX, responsive, mobile, desktop, layout, components, SimpleImputer, Pipeline, etc.) accurately.
+Format the output as clean, continuous, natural plain text with clear paragraph breaks.`,
           {
             inlineData: {
               mimeType: 'audio/webm',
@@ -96,11 +110,39 @@ Format:
           }
         ]);
         const res = await result.response;
-        rawDialogue = res.text().trim();
-        if (rawDialogue) break;
+        rawDialogue = stripSpeakerTags((res.text() || '').trim());
+        if (rawDialogue) {
+          console.log(`✨ Gemini Audio (${modelName}) succeeded ✓`);
+          break;
+        }
       } catch (e) {
         console.warn(`⚠️ Gemini Audio (${modelName}) failed:`, e.message);
       }
+    }
+  }
+
+  // Strategy 2: Groq Whisper Fallback (if Gemini Audio was unavailable)
+  if (!rawDialogue && hasGroq) {
+    try {
+      console.log('⚡ Falling back to Groq Whisper Large v3...');
+      const groq = new Groq({ apiKey: groqKey });
+      const transcription = await groq.audio.transcriptions.create({
+        file: fs.createReadStream(audioPath),
+        model: 'whisper-large-v3',
+        language: 'ur',
+        response_format: 'verbose_json',
+        temperature: 0.0,
+        prompt: 'یہ ایک تکنیکی میٹنگ کی ہائی کوالٹی اردو اور انگریزی گفتگو ہے۔ الفاظ: ٹھیک ہے، ماڈیولز، ڈیپلائمنٹ، اسپیڈ، پیجز، لوڈ، UI، UX، رسپانسو، ڈیسک ٹاپ، موبائل۔'
+      });
+      rawDialogue = transcription.text ? transcription.text.trim() : '';
+      if (rawDialogue) {
+        rawDialogue = stripSpeakerTags(rawDialogue
+          .replace(/\b(Thank you for watching|Thank you very much|Thank you|Subtitles by|Amara\.org)\b[\.\!\?]?/gi, '')
+          .replace(/\s+/g, ' ')
+          .trim());
+      }
+    } catch (e) {
+      console.warn('⚠️ Groq Whisper failed:', e.message);
     }
   }
 
@@ -109,53 +151,92 @@ Format:
     process.exit(1);
   }
 
-  console.log('📝 Structuring bilingual transcripts & action items with Gemini...');
-  const genAI = new GoogleGenerativeAI(geminiKey || groqKey);
-  const structModels = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  console.log('📝 Structuring plain bilingual transcripts & action items with Gemini...');
   let jsonText = '';
 
-  for (const modelName of structModels) {
-    try {
-      const structModel = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: 'application/json'
-        },
-        systemInstruction: `You are a world-class bilingual executive scribe for Urdu and English (Urdish).
-Convert raw dialogue into polished bilingual transcripts and action items.
+  if (hasGemini) {
+    const genAI = new GoogleGenerativeAI(geminiKey);
+    const structModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+
+    for (const modelName of structModels) {
+      try {
+        const structModel = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json'
+          },
+          systemInstruction: `You are a world-class bilingual executive scribe for Urdu and English (Urdish).
+Convert raw dialogue into polished plain bilingual transcripts and action items.
 Rules:
-- Strict speaker attribution: [Speaker Name]: on every line of transcripts.
-- Authentic Urdu script (نستعلیق / اردو رسم الخط) - NO Arabic greetings.
-- English transcript must be accurate professional English translation.
-- Action items: bullet points with assigned person names.
+- Strictly NO speaker names, labels, or tags anywhere in the output.
+- Authentic Urdu script (نستعلیق / اردو رسم الخط) with natural punctuation and paragraph breaks.
+- Preserve UI/UX, web, software, and data technical vocabulary accurately (UI, responsive, mobile, desktop, layout, components).
+- English transcript must be accurate professional English translation without speaker names.
+- Action items: clean bullet points of tasks/decisions WITHOUT person names or assignments.
 Output JSON schema:
 {
-  "transcript_urdu": "Full speaker-wise dialogue in Urdu script",
-  "transcript_english": "Full speaker-wise dialogue translation in English",
-  "action_items_urdu": "Bullet-pointed tasks with assigned person names in Urdu",
-  "action_items_english_improved": "Polished business English action items"
+  "transcript_urdu": "Full plain dialogue/paragraphs in Urdu script without speaker names",
+  "transcript_english": "Full plain dialogue translation in English without speaker names",
+  "action_items_urdu": "Bullet-pointed tasks in Urdu without person names",
+  "action_items_english_improved": "Polished business English action items without person names"
 }`
-      });
+        });
 
-      const structRes = await structModel.generateContent(
-        `Here is the raw transcribed meeting dialogue:\n\n${rawDialogue}\n\nFormat into bilingual transcripts and action items adhering strictly to schema.`
-      );
-      jsonText = structRes.response.text().trim()
-        .replace(/^```json\s*/i, '')
-        .replace(/^```\s*/i, '')
-        .replace(/\s*```$/i, '');
-      if (jsonText) break;
+        const structRes = await structModel.generateContent(
+          `Here is the raw transcribed meeting dialogue:\n\n${rawDialogue}\n\nFormat into plain bilingual transcripts and action items strictly excluding speaker names adhering to schema.`
+        );
+        jsonText = structRes.response.text().trim()
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/\s*```$/i, '');
+        if (jsonText) break;
+      } catch (e) {
+        console.warn(`⚠️ Structuring with ${modelName} failed:`, e.message);
+      }
+    }
+  }
+
+  // Fallback to Groq LLM if Gemini failed
+  if (!jsonText && hasGroq) {
+    try {
+      console.log('⚡ Structuring with Groq LLaMA 3.3 70B...');
+      const groq = new Groq({ apiKey: groqKey });
+      const completion = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert bilingual Urdu/English meeting scribe.
+Generate plain bilingual transcripts and action items strictly without speaker names.
+Schema:
+{
+  "transcript_urdu": "string",
+  "transcript_english": "string",
+  "action_items_urdu": "string",
+  "action_items_english_improved": "string"
+}`
+          },
+          {
+            role: 'user',
+            content: `Meeting dialogue:\n${rawDialogue}\nOutput valid JSON without markdown wrapping.`
+          }
+        ],
+        temperature: 0.1,
+        response_format: { type: 'json_object' }
+      });
+      jsonText = completion.choices[0]?.message?.content?.trim();
     } catch (e) {
-      console.warn(`⚠️ Structuring with ${modelName} failed:`, e.message);
+      console.warn('⚠️ Groq structuring failed:', e.message);
     }
   }
 
   if (!jsonText) {
-    throw new Error('Failed to structure notes with Gemini models.');
+    throw new Error('Failed to structure notes with available AI models.');
   }
 
-  const data = JSON.parse(jsonText);
+  const rawParsed = JSON.parse(jsonText);
+  const data = sanitizePlainMeetingNotes(rawParsed);
   const utf8BOM = '\uFEFF';
 
   fs.writeFileSync(path.join(meetingDir, '1_transcript_urdu.txt'), utf8BOM + (data.transcript_urdu || ''), 'utf8');

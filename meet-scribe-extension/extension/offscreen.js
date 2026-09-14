@@ -19,22 +19,30 @@ let isMeetMicMuted = false;
 let rawStreams = [];
 let currentMeetingFolder = '';
 
-// Helper: Maintain local microphone stream for recorder
+// Helper: Synchronize microphone mute state with Google Meet
 function setMicMuteState(isMuted) {
   isMeetMicMuted = Boolean(isMuted);
-  console.log(`[Offscreen] Mic Sync: Local Mic status updated: ${isMeetMicMuted ? 'MUTED on Meet' : 'UNMUTED on Meet'}`);
+  console.log(`[Offscreen] Mic Sync: Google Meet mic is ${isMeetMicMuted ? 'MUTED (Recording silenced)' : 'UNMUTED (Recording active)'}`);
 
-  // Always keep microphone track active in recorder so audio transcription has speech
+  // 1. Control hardware mic track enabled state
   if (activeMicTrack) {
-    try { activeMicTrack.enabled = true; } catch (e) {}
+    try {
+      activeMicTrack.enabled = !isMeetMicMuted;
+    } catch (e) {}
   }
 
+  // 2. Control Web Audio DSP gain node (0.0 when muted, 1.0 when unmuted)
   if (activeMicGainNode && activeAudioContext && activeAudioContext.state !== 'closed') {
     try {
       const now = activeAudioContext.currentTime;
       activeMicGainNode.gain.cancelScheduledValues(now);
-      activeMicGainNode.gain.setValueAtTime(1.0, now);
-    } catch (e) {}
+      activeMicGainNode.gain.setValueAtTime(activeMicGainNode.gain.value, now);
+      activeMicGainNode.gain.linearRampToValueAtTime(isMeetMicMuted ? 0.0 : 1.0, now + 0.03);
+    } catch (e) {
+      try {
+        activeMicGainNode.gain.setValueAtTime(isMeetMicMuted ? 0.0 : 1.0, activeAudioContext.currentTime);
+      } catch (err) {}
+    }
   }
 }
 
@@ -187,8 +195,12 @@ async function startRecording(streamId, initialMuteState = false) {
     highpassFilter.Q.setValueAtTime(0.7, activeAudioContext.currentTime);
 
     activeMicGainNode = activeAudioContext.createGain();
-    activeMicGainNode.gain.setValueAtTime(1.0, activeAudioContext.currentTime);
-    if (activeMicTrack) activeMicTrack.enabled = true;
+    const initialGain = isMeetMicMuted ? 0.0 : 1.0;
+    activeMicGainNode.gain.setValueAtTime(initialGain, activeAudioContext.currentTime);
+    if (activeMicTrack) {
+      activeMicTrack.enabled = !isMeetMicMuted;
+    }
+    console.log(`[Offscreen] Microphone DSP initialized. Initial state: ${isMeetMicMuted ? 'MUTED (Mic track disabled, Gain=0.0)' : 'UNMUTED (Mic track active, Gain=1.0)'}`);
 
     micSourceNode.connect(highpassFilter);
     highpassFilter.connect(activeMicGainNode);
@@ -283,48 +295,84 @@ async function stopRecording() {
   });
 }
 
-// Fallback: Transcribe audio with AI backend when live captions were not available in Google Meet
-async function processAudioFallback(backendUrl, geminiApiKey, groqApiKey, participants = []) {
+// Local backends have no payload limit; cloud (Vercel) Serverless Functions hard-cap
+// request bodies at 4.5MB regardless of any app-level config, so we must not even
+// attempt a cloud upload once the recording exceeds that ceiling.
+const LOCAL_BACKEND_URLS = ['http://localhost:3001', 'http://localhost:3000'];
+const CLOUD_BACKEND_URLS = ['https://meet-scribe-five.vercel.app'];
+const CLOUD_PAYLOAD_LIMIT_BYTES = 4.4 * 1024 * 1024; // stay safely under Vercel's 4.5MB hard limit
+
+function isLocalBackendUrl(url) {
+  return /^https?:\/\/localhost(:\d+)?/i.test(url) || /^https?:\/\/127\.0\.0\.1(:\d+)?/i.test(url);
+}
+
+// Process audio recording with AI backend (primary pipeline)
+async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
   if (!lastCompiledAudioBlob || lastCompiledAudioBlob.size === 0) {
     throw new Error('No audio recording available for AI transcription.');
   }
 
-  const formData = new FormData();
-  formData.append('audio', lastCompiledAudioBlob, 'meeting_audio.webm');
-  if (geminiApiKey) formData.append('geminiApiKey', geminiApiKey);
-  if (groqApiKey) formData.append('groqApiKey', groqApiKey);
-  if (Array.isArray(participants) && participants.length > 0) {
-    formData.append('participants', JSON.stringify(participants));
-  }
+  const audioSizeMB = (lastCompiledAudioBlob.size / (1024 * 1024)).toFixed(2);
+  const candidates = Array.from(new Set([
+    backendUrl,
+    ...LOCAL_BACKEND_URLS,
+    ...CLOUD_BACKEND_URLS
+  ].filter(Boolean).map(u => u.replace(/\/+$/, ''))));
 
-  const cleanUrl = (backendUrl || 'http://localhost:3001').replace(/\/+$/, '');
-  console.log(`[Offscreen Audio Fallback] Sending audio (${(lastCompiledAudioBlob.size / (1024 * 1024)).toFixed(2)} MB) to ${cleanUrl}/api/process-meeting...`);
+  let lastError = null;
+  let skippedCloudForSize = false;
 
-  const response = await fetch(`${cleanUrl}/api/process-meeting`, {
-    method: 'POST',
-    headers: {
-      ...(geminiApiKey ? { 'X-Gemini-API-Key': geminiApiKey } : {}),
-      ...(groqApiKey ? { 'X-Groq-API-Key': groqApiKey } : {})
-    },
-    body: formData
-  });
+  for (const cleanUrl of candidates) {
+    if (!isLocalBackendUrl(cleanUrl) && lastCompiledAudioBlob.size > CLOUD_PAYLOAD_LIMIT_BYTES) {
+      console.warn(`[Offscreen Audio] Skipping cloud backend ${cleanUrl} — recording is ${audioSizeMB}MB, above the ~4.4MB cloud upload limit.`);
+      skippedCloudForSize = true;
+      continue;
+    }
 
-  if (!response.ok) {
-    const errText = await response.text();
-    let parsedMsg = errText;
+    const formData = new FormData();
+    formData.append('audio', lastCompiledAudioBlob, 'meeting_audio.webm');
+    if (geminiApiKey) formData.append('geminiApiKey', geminiApiKey);
+    if (groqApiKey) formData.append('groqApiKey', groqApiKey);
+
+    console.log(`[Offscreen Audio] Sending audio recording (${audioSizeMB} MB) to ${cleanUrl}/api/process-meeting...`);
+
     try {
-      const j = JSON.parse(errText);
-      parsedMsg = j.error || j.message || errText;
-    } catch (e) {}
-    throw new Error(`Audio AI Error (${response.status}): ${parsedMsg}`);
+      const response = await fetch(`${cleanUrl}/api/process-meeting`, {
+        method: 'POST',
+        headers: {
+          ...(geminiApiKey ? { 'X-Gemini-API-Key': geminiApiKey } : {}),
+          ...(groqApiKey ? { 'X-Groq-API-Key': groqApiKey } : {})
+        },
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        let parsedMsg = errText;
+        try {
+          const j = JSON.parse(errText);
+          parsedMsg = j.error || j.message || errText;
+        } catch (e) {}
+        throw new Error(`Audio AI Error (${response.status}): ${parsedMsg}`);
+      }
+
+      const resJson = await response.json();
+      if (!resJson.success || !resJson.data) {
+        throw new Error(resJson.error || 'Invalid response from Audio AI backend.');
+      }
+
+      return { success: true, data: resJson.data };
+    } catch (err) {
+      console.warn(`[Offscreen Audio] Backend ${cleanUrl} failed:`, err.message);
+      lastError = err;
+    }
   }
 
-  const resJson = await response.json();
-  if (!resJson.success || !resJson.data) {
-    throw new Error(resJson.error || 'Invalid response from Audio AI backend.');
+  if (skippedCloudForSize && (!lastError || /fetch|network|failed to fetch/i.test(lastError.message))) {
+    throw new Error(`Recording is ${audioSizeMB}MB, too large for the free cloud backend (4.5MB limit) and no local backend was reachable. Please run the backend locally ("npm start" in meet-scribe-extension/backend) and try again.`);
   }
 
-  return { success: true, data: resJson.data };
+  throw lastError || new Error('Could not reach any backend server to process the audio.');
 }
 
 // Listen for messages from background script
@@ -352,11 +400,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
 
-  } else if (message.type === 'PROCESS_AUDIO_FALLBACK') {
-    processAudioFallback(message.backendUrl, message.geminiApiKey, message.groqApiKey, message.participants || [])
+  } else if (message.type === 'PROCESS_AUDIO' || message.type === 'PROCESS_AUDIO_FALLBACK') {
+    processAudio(message.backendUrl, message.geminiApiKey, message.groqApiKey)
       .then(res => sendResponse(res))
       .catch(err => {
-        console.error('[Offscreen] Audio fallback error:', err);
+        console.error('[Offscreen] Audio processing error:', err);
         sendResponse({ success: false, error: err.message });
       });
     return true;

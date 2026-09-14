@@ -7,7 +7,11 @@ const fs = require('fs');
 const path = require('path');
 const Groq = require('groq-sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { GoogleAIFileManager } = require('@google/generative-ai/server');
+const { GoogleAIFileManager, FileState } = require('@google/generative-ai/server');
+
+// Gemini's inline-base64 request path has a hard ~20MB ceiling; anything larger
+// must go through the File API (upload once, reference by URI).
+const GEMINI_INLINE_LIMIT_BYTES = 15 * 1024 * 1024;
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -80,12 +84,35 @@ app.get(['/api/health', '/health'], (req, res) => {
       geminiConfigured
     }
   });
-});
+});/**
+ * Helper: Strip any speaker tags or name prefixes from text
+ * Guarantees 100% plain text output with zero "[Speaker]:" or "[Name]:" prefixes.
+ */
+function stripSpeakerTags(str) {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .replace(/^\uFEFF/, '')
+    .replace(/^\[?\s*(?:Speaker(?:\s*\d+)?|Participant(?:\s*\d+)?|Person(?:\s*\d+)?|User|Host|Attendee|Unknown|You|آپ|مقرر|بولنے\s*والا|[^\]:\n]{1,40})\s*\]?\s*:\s*/gim, '')
+    .replace(/\n\[?\s*(?:Speaker(?:\s*\d+)?|Participant(?:\s*\d+)?|Person(?:\s*\d+)?|User|Host|Attendee|Unknown|You|آپ|مقرر|بولنے\s*والا|[^\]:\n]{1,40})\s*\]?\s*:\s*/gim, '\n')
+    .replace(/•\s*\[?\s*(?:Speaker(?:\s*\d+)?|Participant|Person|User|Host|Attendee|Unknown|You|آپ|[^\]]+)\s*\]?\s*:\s*/gim, '• ')
+    .replace(/\[?Speaker(?:\s*\d+)?\]?\s*:\s*/gi, '')
+    .replace(/\[Speaker\]/gi, '')
+    .trim();
+}
+
+function sanitizePlainMeetingNotes(data) {
+  if (!data || typeof data !== 'object') return data;
+  return {
+    transcript_urdu: stripSpeakerTags(data.transcript_urdu),
+    transcript_english: stripSpeakerTags(data.transcript_english),
+    action_items_urdu: stripSpeakerTags(data.action_items_urdu),
+    action_items_english_improved: stripSpeakerTags(data.action_items_english_improved)
+  };
+}
 
 /**
- * Helper: Structure and Translate Captions with Google Gemini
- * Takes ground-truth speaker-tagged captions from Google Meet and produces
- * bilingual transcripts and action items with 100% accurate speaker attribution.
+ * Helper: Structure and Translate Meeting Text with Google Gemini
+ * Generates plain bilingual transcripts and action items without any speaker names.
  */
 async function processCaptionsWithGemini(rawTranscript, participants = [], clientGeminiKey) {
   const activeGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
@@ -97,58 +124,51 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
   const userConfiguredModel = process.env.GEMINI_MODEL;
   const modelCandidates = [
     ...(userConfiguredModel ? [userConfiguredModel] : []),
-    'gemini-3.5-flash-lite',
-    'gemini-3.5-flash',
     'gemini-2.5-flash',
     'gemini-2.0-flash',
     'gemini-1.5-flash',
     'gemini-1.5-pro'
   ];
 
-  const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
-  const participantsHint = participantsList.length > 0
-    ? `VERIFIED MEETING ATTENDEES (use these exact names for attribution):\n${participantsList.map(p => `- ${p}`).join('\n')}`
-    : `PARTICIPANTS: Use speaker labels exactly as they appear in the input (e.g. [Speaker Name]:). Do not invent names.`;
-
-  const systemInstruction = `You are an expert bilingual Urdu/English meeting scribe. Your ONLY job is to faithfully format and translate the EXACT captions text you receive. You do NOT summarize, paraphrase, invent, hallucinate, or add any content not present in the input.
-
-${participantsHint}
+  const systemInstruction = `You are an expert bilingual Urdu/English meeting scribe. Your ONLY job is to faithfully format and translate the meeting content you receive into plain, clean text. You do NOT summarize, invent, hallucinate, or add any content not present in the input.
 
 MANDATORY RULES — VIOLATING ANY IS UNACCEPTABLE:
 
-1. ZERO HALLUCINATION & STRICT ATTRIBUTION:
-   - Transcribe ONLY what is in the input. Do NOT add sentences, words, or ideas not present.
-   - EVERY line MUST start with a speaker name (e.g. "[Speaker Name]: ").
-   - If speaker names ARE in the input, preserve them exactly.
-   - CRITICAL: If the input lacks speaker names (e.g. a raw audio transcript), DO NOT GUESS OR INVENT NAMES from the participant list. Simply use "[Speaker]:" or "[Speaker 1]:", "[Speaker 2]:" based on conversation flow. 
+1. STRICTLY EXCLUDE ALL SPEAKER NAMES:
+   - Do NOT include any speaker names, labels, or tags anywhere in the output (e.g. do NOT output "[Speaker Name]:", "[Speaker]:", "[Person]:", "[You]:", or name prefixes).
+   - Provide clean, continuous, natural plain content without attributing who said what.
 
-2. AUTHENTIC & PROFESSIONAL URDU:
+2. AUTHENTIC & PROFESSIONAL URDU (transcript_urdu):
    - Language is Pakistani/Indian URDU (اردو رسم الخط / نستعلیق), NOT Arabic.
-   - Use: السلام علیکم, ہیلو, جی, ٹھیک ہے, کیا حال ہے, آپ, ہم, وہ
-   - Technical English words stay natural in Urdu: "اپ ڈیٹ", "بٹن", "اسکرین شیئر", "ڈیٹا"
-   - FORMATTING: Ensure the Urdu text is well-formatted with proper punctuation (ختمہ، سکتہ), clear sentence breaks, and readable paragraphs. Do not output a giant wall of text.
+   - Use natural Urdu vocabulary: السلام علیکم, ہیلو, جی, ٹھیک ہے, کیا حال ہے, آپ, ہم, وہ
+   - Technical English terms stay natural in Urdu (e.g. "سمپل امپیوٹر", "پائپ لائن", "کالم ٹرانسفارمر", "کراس ویلیڈیشن", "نل ویلیوز" or natural transliteration).
+   - FORMATTING: Ensure the Urdu text is well-formatted with proper punctuation (ختمہ، سکتہ), clear sentence breaks, and readable paragraphs.
+   - Strictly NO speaker names or tags.
 
-3. TRANSLATE, DON'T TRANSCRIBE FOR ENGLISH:
-   - transcript_urdu = the spoken Urdu/English dialogue written in Urdu script.
-   - transcript_english = a clean, accurate, and professional English translation of transcript_urdu.
+3. ACCURATE ENGLISH TRANSLATION (transcript_english):
+   - Clean, accurate, professional, and faithful English translation of the spoken content.
+   - Preserve technical machine learning, data science, and domain terms with accuracy.
+   - Format into clean, readable paragraphs.
+   - Strictly NO speaker names or tags.
 
-4. ACTION ITEMS — CONCRETE ONLY:
-   - Extract real, specific tasks/decisions assigned to named people.
-   - Format: "• [Person Name]: [Specific task]"
-   - If genuinely no action items exist: "• No specific action items were identified."
+4. ACTION ITEMS WITHOUT NAMES:
+   - Extract real, specific tasks and decisions discussed.
+   - Format: "• [Specific task or decision]"
+   - Strictly do NOT assign or prefix with person names (e.g. do NOT write "• [Person]: task", just write "• [Specific task]").
+   - If no action items were discussed: "• No specific action items were identified."
 
 OUTPUT JSON (strict schema, no extra keys):
 {
-  "transcript_urdu": "Speaker-attributed Urdu dialogue. Every line: [Name]: text",
-  "transcript_english": "Speaker-attributed English translation. Every line: [Name]: text",
-  "action_items_urdu": "Bullet list of real tasks in Urdu, or empty state",
-  "action_items_english_improved": "Bullet list of real tasks in English, or empty state"
+  "transcript_urdu": "Plain continuous Urdu dialogue/paragraphs in Urdu script without speaker names.",
+  "transcript_english": "Plain continuous English translation/paragraphs without speaker names.",
+  "action_items_urdu": "Bullet list of real tasks in Urdu without person names, or empty state.",
+  "action_items_english_improved": "Bullet list of real tasks in English without person names, or empty state."
 }`;
 
   let lastError = null;
   for (const modelName of modelCandidates) {
     try {
-      console.log(`[Backend Gemini Captions] Structuring with model: ${modelName}...`);
+      console.log(`[Backend Gemini] Structuring plain notes with model: ${modelName}...`);
       const model = genAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
@@ -158,7 +178,10 @@ OUTPUT JSON (strict schema, no extra keys):
         systemInstruction: systemInstruction
       });
 
-      const prompt = `Below are the verbatim Google Meet closed captions from a real meeting. Format them faithfully into bilingual transcripts and action items. Do NOT add, remove, or change any spoken content.\n\n---\n${rawTranscript}\n---\n\nReturn JSON only.`;
+      const prompt = `Below is the meeting content transcribed from audio.
+Format it into plain bilingual transcripts and action items strictly excluding any speaker names or tags.
+Note: The spoken dialogue is Pakistani/Indian corporate/tech Urdish (software development, web, UI/UX, tech, or business). Fix any obvious phonetic speech-to-text misrecognitions (for example: "UI" or "یو آئی" should not be transcribed as "اوائی"; "desktop / screen" should not be confused with "موسیقی").
+Do NOT add, remove, or alter the meaning.\n\n---\n${rawTranscript}\n---\n\nReturn JSON only.`;
       const result = await model.generateContent(prompt);
       const response = await result.response;
       const responseText = response.text().trim();
@@ -175,19 +198,19 @@ OUTPUT JSON (strict schema, no extra keys):
         parsedData[k] = parsedData[k] || '';
       });
 
-      console.log(`[Backend Gemini Captions] Successfully structured notes with ${modelName}.`);
-      return parsedData;
+      console.log(`[Backend Gemini] Successfully structured notes with ${modelName}.`);
+      return sanitizePlainMeetingNotes(parsedData);
     } catch (err) {
-      console.warn(`[Backend Gemini Captions] Error with ${modelName}:`, err.message);
+      console.warn(`[Backend Gemini] Error with ${modelName}:`, err.message);
       lastError = err;
     }
   }
 
-  throw new Error(`Captions processing failed: ${lastError ? lastError.message : 'Unknown error'}`);
+  throw new Error(`Content processing failed: ${lastError ? lastError.message : 'Unknown error'}`);
 }
 
 /**
- * Fallback: Process Captions with Groq LLM (tries multiple models in order)
+ * Fallback: Process Meeting Text with Groq LLM
  */
 async function processCaptionsWithGroq(rawTranscript, participants = [], clientGroqKey) {
   const activeGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
@@ -211,11 +234,11 @@ async function processCaptionsWithGroq(rawTranscript, participants = [], clientG
       role: 'system',
       content: `You are a bilingual Urdu/English meeting notes assistant.
 Return ONLY valid JSON with keys: "transcript_urdu", "transcript_english", "action_items_urdu", "action_items_english_improved".
-Preserve exact speaker names. Spoken language is Urdu/English, NOT Arabic.`
+Strictly DO NOT include any speaker names or speaker tags. Provide plain continuous paragraphs for transcripts and bullet points without person names for action items. Spoken language is Urdu/English, NOT Arabic.`
     },
     {
       role: 'user',
-      content: `Format these Google Meet captions into bilingual transcripts and action items:\n\n${rawTranscript}`
+      content: `Format this meeting content into plain bilingual transcripts and action items (strictly excluding speaker names):\n\n${rawTranscript}`
     }
   ];
 
@@ -230,7 +253,7 @@ Preserve exact speaker names. Spoken language is Urdu/English, NOT Arabic.`
         response_format: { type: 'json_object' }
       });
       const content = completion.choices[0]?.message?.content || '{}';
-      return JSON.parse(content);
+      return sanitizePlainMeetingNotes(JSON.parse(content));
     } catch (groqModelErr) {
       console.warn(`[Backend Groq LLM] Error with ${model}:`, groqModelErr.message);
       lastGroqErr = groqModelErr;
@@ -343,90 +366,185 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
 
   const clientGroqKey = req.headers['x-groq-api-key'] || req.body?.groqApiKey;
   const clientGeminiKey = req.headers['x-gemini-api-key'] || req.body?.geminiApiKey;
-  let participants = [];
-  if (req.body?.participants) {
-    try {
-      participants = typeof req.body.participants === 'string'
-        ? JSON.parse(req.body.participants)
-        : req.body.participants;
-    } catch (e) {
-      participants = Array.isArray(req.body.participants) ? req.body.participants : [];
-    }
-  }
-  const participantsList = Array.isArray(participants) ? participants.filter(Boolean) : [];
   const filePath = uploadedFile.path;
 
   try {
-    let rawText = '';
+    let structuredOutput = null;
 
-    // Strategy 1: Groq Whisper Large v3 (Fastest, ultra-accurate for bilingual Urdu/English)
-    const effectiveGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
-    if (effectiveGroqKey && effectiveGroqKey !== 'your_groq_api_key_here') {
-      try {
-        console.log('[MeetScribe Audio] Transcribing with Groq Whisper Large v3...');
-        const groq = new Groq({ apiKey: effectiveGroqKey });
-        const transcription = await groq.audio.transcriptions.create({
-          file: fs.createReadStream(filePath),
-          model: 'whisper-large-v3',
-          response_format: 'verbose_json',
-          temperature: 0.0,
-          prompt: `A professional meeting conversation in Urdu and English. The audio may contain silence, please ignore silence and only transcribe speech.`
-        });
-        rawText = transcription.text ? transcription.text.trim() : '';
-      } catch (whisperErr) {
-        console.warn('[MeetScribe Audio] Groq Whisper error, attempting Gemini fallback:', whisperErr.message);
-      }
-    }
-
-    // Strategy 2: Google Gemini Direct Audio Understanding
+    // Strategy 1: Google Gemini Direct Multimodal Audio AI (Highest fidelity for Urdu/English)
     const effectiveGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
-    if (!rawText && effectiveGeminiKey && effectiveGeminiKey !== 'your_gemini_api_key_here') {
+    if (effectiveGeminiKey && effectiveGeminiKey !== 'your_gemini_api_key_here') {
       const genAI = new GoogleGenerativeAI(effectiveGeminiKey);
-      const fileBuffer = fs.readFileSync(filePath);
-      const base64Audio = fileBuffer.toString('base64');
+      const audioFileSize = fs.statSync(filePath).size;
+      const useFileApi = audioFileSize > GEMINI_INLINE_LIMIT_BYTES;
+
+      // Large recordings: upload once via the File API and reference by URI.
+      // Small recordings: send inline as base64 (avoids upload+poll round-trip latency).
+      let audioPart = null;
+      let uploadedGeminiFile = null;
+      if (useFileApi) {
+        console.log(`[MeetScribe Audio] File is ${(audioFileSize / (1024 * 1024)).toFixed(1)}MB — uploading via Gemini File API...`);
+        const fileManager = new GoogleAIFileManager(effectiveGeminiKey);
+        uploadedGeminiFile = await fileManager.uploadFile(filePath, { mimeType: 'audio/webm' });
+        let fileInfo = uploadedGeminiFile.file;
+        while (fileInfo.state === FileState.PROCESSING) {
+          await new Promise(r => setTimeout(r, 2000));
+          fileInfo = await fileManager.getFile(fileInfo.name);
+        }
+        if (fileInfo.state === FileState.FAILED) {
+          throw new Error('Gemini File API failed to process the uploaded audio.');
+        }
+        audioPart = { fileData: { fileUri: fileInfo.uri, mimeType: fileInfo.mimeType } };
+      } else {
+        const fileBuffer = fs.readFileSync(filePath);
+        audioPart = { inlineData: { mimeType: 'audio/webm', data: fileBuffer.toString('base64') } };
+      }
+
+      const userConfiguredModel = process.env.GEMINI_MODEL;
       const audioModelCandidates = [
-        'gemini-3.5-flash-lite',
-        'gemini-3.5-flash',
+        ...(userConfiguredModel ? [userConfiguredModel] : []),
         'gemini-2.5-flash',
         'gemini-2.0-flash',
         'gemini-1.5-flash',
         'gemini-1.5-pro'
       ];
 
+      const audioSystemInstruction = `You are an expert bilingual Urdu and English executive scribe.
+Listen carefully to this meeting audio recording and produce a complete, authentic, verbatim bilingual record with concrete action items.
+
+MEETING DOMAIN & VOCABULARY:
+- Spoken language is Pakistani/Indian corporate and technical Urdu mixed with English (Urdish).
+- Topics frequently include software engineering, web development, frontend, UI/UX design, mobile & desktop apps, responsive layouts, and business:
+  e.g., UI, UX, responsive, mobile, desktop, screens, layout, components, buttons, dashboard, frontend, backend, APIs, bugs, features, testing, updates.
+- Accurately transcribe English technical words into natural Urdu transliteration or English (e.g. "UI / یو آئی", "رسپانسو / Responsive", "ڈیسک ٹاپ / Desktop", "موبائل / Mobile", "ڈیش بورڈ / Dashboard", "اسکرین / Screen").
+- Do NOT mishear tech words as unrelated Arabic or random words (e.g. do NOT confuse "desktop / screen" with "موسیقی", do NOT confuse "UI" with "اوائی").
+
+MANDATORY RULES:
+1. STRICTLY ZERO SPEAKER LABELS OR TAGS:
+   - Do NOT output "[Speaker]:", "[Speaker 1]:", "[Participant]:", "[Unknown]:", "[Name]:", or ANY prefix.
+   - Every paragraph must start directly with the spoken words.
+   - Provide clean, continuous, natural plain content without attributing who said what.
+
+2. AUTHENTIC & ACCURATE URDU SCRIPT (transcript_urdu):
+   - Transcribe all spoken Urdu and English dialogue verbatim in authentic Urdu script (اردو رسم الخط / نستعلیق).
+   - Format with proper punctuation (ختمہ، سکتہ) and clear, readable paragraphs.
+   - Strictly NO speaker names or tags.
+
+3. ACCURATE PROFESSIONAL ENGLISH TRANSLATION (transcript_english):
+   - Clean, professional, faithful English translation of what was spoken.
+   - Retain full technical domain accuracy (e.g. "make its UI responsive on mobile and desktop").
+   - Format into clean, readable paragraphs.
+   - Strictly NO speaker names or tags.
+
+4. ACTION ITEMS WITHOUT NAMES (action_items_urdu & action_items_english_improved):
+   - Extract real, specific tasks and decisions discussed in the audio.
+   - Format: "• [Specific task or decision]"
+   - Strictly do NOT assign to or prefix with speaker/person names.
+   - If no specific action items were discussed: "• No specific action items were identified."
+
+OUTPUT JSON (strict schema, no extra keys):
+{
+  "transcript_urdu": "Plain continuous Urdu dialogue and paragraphs in Urdu script without speaker names.",
+  "transcript_english": "Plain continuous English translation and paragraphs without speaker names.",
+  "action_items_urdu": "Bullet list of real tasks in Urdu without person names, or empty state.",
+  "action_items_english_improved": "Bullet list of real tasks in English without person names, or empty state."
+}`;
+
       for (const modelName of audioModelCandidates) {
         try {
-          console.log(`[MeetScribe Audio] Transcribing with Google Gemini Audio (${modelName})...`);
-          const model = genAI.getGenerativeModel({ model: modelName });
+          console.log(`[MeetScribe Audio] Processing audio directly with Google Gemini (${modelName})...`);
+          const model = genAI.getGenerativeModel({
+            model: modelName,
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: 'application/json'
+            },
+            systemInstruction: audioSystemInstruction
+          });
+
           const result = await model.generateContent([
-            `Please listen carefully to this meeting audio recording and transcribe all spoken Urdu and English conversation verbatim into clean dialogue with speaker attribution.
-Known meeting participants: ${participantsList.join(', ') || 'Attendees'}.
-Format each utterance as:
-[Speaker Name]: [Spoken dialogue]`,
-            {
-              inlineData: {
-                mimeType: 'audio/webm',
-                data: base64Audio
-              }
-            }
+            `Please listen carefully to this meeting audio recording and generate the plain bilingual meeting notes (strictly excluding speaker names) according to the system instructions. Return JSON only.`,
+            audioPart
           ]);
+
           const response = await result.response;
-          rawText = response.text() ? response.text().trim() : '';
-          if (rawText) break;
+          const responseText = (response.text() || '').trim();
+          const cleanedJsonStr = responseText
+            .replace(/^```json\s*/i, '')
+            .replace(/^```\s*/i, '')
+            .replace(/\s*```$/i, '')
+            .trim();
+
+          const parsedData = JSON.parse(cleanedJsonStr);
+          if (parsedData && (parsedData.transcript_urdu || parsedData.transcript_english)) {
+            structuredOutput = parsedData;
+            console.log(`[MeetScribe Audio] Direct Gemini Audio (${modelName}) succeeded ✓`);
+            break;
+          }
         } catch (geminiAudioErr) {
-          console.warn(`[MeetScribe Audio] Gemini Audio (${modelName}) error:`, geminiAudioErr.message);
+          console.warn(`[MeetScribe Audio] Gemini Audio (${modelName}) attempt failed:`, geminiAudioErr.message);
+        }
+      }
+
+      if (uploadedGeminiFile) {
+        try {
+          const fileManager = new GoogleAIFileManager(effectiveGeminiKey);
+          await fileManager.deleteFile(uploadedGeminiFile.file.name);
+        } catch (cleanupErr) {
+          console.warn('[MeetScribe Audio] Could not delete temporary Gemini file:', cleanupErr.message);
         }
       }
     }
 
-    if (!rawText) {
-      throw new Error('Could not transcribe audio. Please ensure either your Groq API Key or Gemini API Key is configured in settings.');
-    }
+    // Strategy 2: Groq Whisper Large v3 Fallback (if Gemini Audio failed or was unavailable)
+    if (!structuredOutput) {
+      let rawText = '';
+      const effectiveGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
+      if (effectiveGroqKey && effectiveGroqKey !== 'your_groq_api_key_here') {
+        try {
+          console.log('[MeetScribe Audio] Falling back to Groq Whisper Large v3...');
+          const groq = new Groq({ apiKey: effectiveGroqKey });
+          const transcription = await groq.audio.transcriptions.create({
+            file: fs.createReadStream(filePath),
+            model: 'whisper-large-v3',
+            language: 'ur',
+            response_format: 'verbose_json',
+            temperature: 0.0,
+            prompt: 'یہ ایک تکنیکی میٹنگ کی ہائی کوالٹی اردو اور انگریزی گفتگو ہے۔ الفاظ: ٹھیک ہے، ماڈیولز، ڈیپلائمنٹ، اسپیڈ، پیجز، لوڈ، UI، UX، رسپانسو، ڈیسک ٹاپ، موبائل۔'
+          });
+          rawText = transcription.text ? transcription.text.trim() : '';
 
-    const structuredOutput = await processCaptionsWithGemini(rawText, participantsList, clientGeminiKey);
+          // Scrub common Whisper silence hallucinations
+          if (rawText) {
+            rawText = rawText
+              .replace(/\b(Thank you for watching|Thank you very much|Thank you|Subtitles by|Amara\.org)\b[\.\!\?]?/gi, '')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
+        } catch (whisperErr) {
+          console.warn('[MeetScribe Audio] Groq Whisper fallback error:', whisperErr.message);
+        }
+      }
+
+      if (!rawText) {
+        throw new Error('Could not transcribe audio. Please ensure your Gemini API Key or Groq API Key is configured in settings.');
+      }
+
+      // Structure Whisper raw text with Gemini (fallback to Groq LLM)
+      try {
+        structuredOutput = await processCaptionsWithGemini(rawText, [], clientGeminiKey);
+      } catch (gemErr) {
+        if (clientGroqKey || process.env.GROQ_API_KEY) {
+          structuredOutput = await processCaptionsWithGroq(rawText, [], clientGroqKey);
+        } else {
+          throw gemErr;
+        }
+      }
+    }
 
     return res.status(200).json({
       success: true,
-      data: structuredOutput
+      data: sanitizePlainMeetingNotes(structuredOutput)
     });
   } catch (err) {
     console.error('[MeetScribe Audio Error]:', err);
@@ -466,6 +584,23 @@ app.get('/api/auth/status', (req, res) => {
   res.json({
     authenticated: false,
     authSystem: 'Ready for OAuth 2.0 / Firebase Auth / JWT'
+  });
+});
+
+// Central error handler — catches Multer errors (e.g. oversized uploads) and any
+// other thrown/async errors so clients always get a clean JSON response instead of
+// an HTML stack trace or a hung connection.
+app.use((err, req, res, next) => {
+  if (err && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      success: false,
+      error: 'Audio recording exceeds the 500MB server upload limit.'
+    });
+  }
+  console.error('[MeetScribe] Unhandled server error:', err);
+  res.status(500).json({
+    success: false,
+    error: (err && err.message) || 'Internal server error.'
   });
 });
 

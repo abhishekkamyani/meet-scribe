@@ -77,10 +77,25 @@ function removeCaptionsOverlayStyle() {
 }
 
 /* ── CC Button Auto-Enable ──────────────────────────────────────────────── */
+/* ── CC Button Auto-Enable ──────────────────────────────────────────────── */
+function toggleCcViaKeyboard() {
+  try {
+    const keyEvt = new KeyboardEvent('keydown', {
+      key: 'c',
+      code: 'KeyC',
+      keyCode: 67,
+      which: 67,
+      bubbles: true,
+      cancelable: true
+    });
+    document.body.dispatchEvent(keyEvt);
+  } catch (e) {}
+}
+
 function findCcToggleButton() {
   const allBtns = document.querySelectorAll('button, div[role="button"]');
 
-  // 1. Exact jsname (most reliable — survives Meet UI rebuilds)
+  // 1. Exact jsname (survives Meet UI rebuilds)
   for (const btn of allBtns) {
     if (btn.closest('[role="dialog"]')) continue;
     if (btn.getAttribute('jsname') === 'r8qRAd') {
@@ -94,7 +109,7 @@ function findCcToggleButton() {
     }
   }
 
-  // 2. Aria-label / tooltip keyword match
+  // 2. Aria-label / tooltip keyword match & icons
   for (const btn of allBtns) {
     if (btn.closest('[role="dialog"]')) continue;
     const lbl = (btn.getAttribute('aria-label') || '').toLowerCase();
@@ -110,9 +125,10 @@ function findCcToggleButton() {
       lbl.includes('turn on subtitle') || lbl.includes('turn off subtitle') ||
       tip.includes('turn on caption') || tip.includes('turn off caption') ||
       tip.includes('turn on subtitle') || tip.includes('turn off subtitle') ||
+      lbl.includes('captions') || tip.includes('captions') ||
       lbl.includes('کیپشن') || lbl.includes('سب ٹائٹل') ||
-      ((lbl.includes('caption') || tip.includes('caption')) &&
-       (lbl.includes('(c)') || tip.includes('(c)')));
+      btn.querySelector('[data-icon="closed_caption"], [data-icon="closed_caption_off"]') ||
+      btn.innerText.includes('closed_caption');
     if (isCc) return btn;
   }
   return null;
@@ -121,13 +137,18 @@ function findCcToggleButton() {
 function ensureCaptionsEnabled() {
   try {
     const btn = findCcToggleButton();
-    if (!btn) return;
-    const isOn = btn.getAttribute('aria-pressed') === 'true' ||
-      (btn.getAttribute('aria-label') || '').toLowerCase().includes('turn off') ||
-      (btn.getAttribute('data-tooltip') || '').toLowerCase().includes('turn off');
-    if (!isOn) {
-      console.log('[MeetScribe] Auto-enabling Google Meet CC…');
-      btn.click();
+    if (btn) {
+      const isOn = btn.getAttribute('aria-pressed') === 'true' ||
+        (btn.getAttribute('aria-label') || '').toLowerCase().includes('turn off') ||
+        (btn.getAttribute('data-tooltip') || '').toLowerCase().includes('turn off');
+      if (!isOn) {
+        console.log('[MeetScribe] Auto-enabling Google Meet CC via button…');
+        btn.click();
+      }
+    } else {
+      // Fallback: Dispatch Meet shortcut 'c' to toggle captions
+      console.log('[MeetScribe] CC button not found directly, trying shortcut "c"…');
+      toggleCcViaKeyboard();
     }
   } catch(e) { console.warn('[MeetScribe] Could not auto-enable CC:', e); }
 }
@@ -152,9 +173,8 @@ function findCaptionContainer() {
   ]) {
     const el = document.querySelector(sel);
     if (el && (el.innerText || '').trim().length > 1) {
-      // Ensure we don't accidentally grab a tiny notification toast instead of the main CC panel
       const r = el.getBoundingClientRect();
-      if (r.width > 200) return el; 
+      if (r.width > 150) return el; 
     }
   }
 
@@ -163,16 +183,22 @@ function findCaptionContainer() {
 
 /* ── Speaker Name Extraction ────────────────────────────────────────────── */
 function extractSpeakerFromBlock(block) {
-  // Try known Google Meet speaker label class names (most reliable)
+  // Try known Google Meet speaker label class names & data attributes
   const SPEAKER_SELECTORS = [
-    '.zs75Ib', '.NW0r5c', '.jxFHg', '.KcIKyf', '.VbkSUe > span:first-child'
+    '.zs75Ib', '.NW0r5c', '.jxFHg', '.KcIKyf', '.VbkSUe > span:first-child',
+    '.NWpY1d', '.zs7s8d', '[data-self-name]', '[data-sender-name]',
+    '[class*="speaker" i]', '[class*="sender" i]'
   ];
   for (const sel of SPEAKER_SELECTORS) {
     const el = block.querySelector(sel);
     if (el) {
       const name = (el.innerText || '').trim();
       if (name && name.length >= 2 && name.length <= 60) {
-        return name.replace(/\s*\((?:You|آپ|Host|Meeting host|Guest|Presentation)\)/ig, '').trim();
+        const cleaned = name.replace(/\s*\((?:You|آپ|Host|Meeting host|Guest|Presentation)\)/ig, '').trim();
+        if (['you', 'آپ', 'me'].includes(cleaned.toLowerCase())) {
+          return discoveredSelfName || '';
+        }
+        return cleaned;
       }
     }
   }
@@ -181,7 +207,7 @@ function extractSpeakerFromBlock(block) {
   const img = block.querySelector('img[alt]');
   if (img) {
     const alt = (img.getAttribute('alt') || '').trim();
-    if (alt && alt.length >= 2 && !['avatar','profile','photo','person'].includes(alt.toLowerCase())) {
+    if (alt && alt.length >= 2 && !['avatar','profile','photo','person','you','آپ'].includes(alt.toLowerCase())) {
       return alt;
     }
   }
@@ -190,7 +216,8 @@ function extractSpeakerFromBlock(block) {
   const selfEl = block.querySelector('[data-self-name]');
   if (selfEl) {
     const n = (selfEl.getAttribute('data-self-name') || '').trim();
-    if (n && n.length >= 2) return n;
+    if (n && n.length >= 2 && !['you','آپ'].includes(n.toLowerCase())) return n;
+    if (discoveredSelfName) return discoveredSelfName;
   }
 
   return '';
@@ -302,15 +329,20 @@ function processCaptionsDOM() {
     const liveKeys = new Set();
 
     blocks.forEach((block, idx) => {
-      const speaker = extractSpeakerFromBlock(block) || discoveredSelfName || 'Participant';
-      const text    = extractTextFromBlock(block);
+      let speaker = extractSpeakerFromBlock(block);
+      if (!speaker || ['you', 'آپ', 'participant', 'speaker'].includes(speaker.toLowerCase())) {
+        speaker = discoveredSelfName || (Array.from(discoveredParticipantsSet)[0]) || 'Participant';
+      }
+      const text = extractTextFromBlock(block);
 
       if (!text || text.length < 2) return;
 
       // Deduplicate text that is clearly just a speaker label repeated as text
       if (text.toLowerCase() === speaker.toLowerCase()) return;
 
-      uniqueSpeakersSet.add(speaker);
+      if (!['Participant', 'Speaker', 'You', 'آپ'].includes(speaker)) {
+        uniqueSpeakersSet.add(speaker);
+      }
 
       // Segment key: speaker + block position index
       // Using index because Meet shows max ~3 blocks simultaneously
@@ -375,41 +407,9 @@ function flushSegmentToHistory(seg) {
 
 /* ── Observer lifecycle ──────────────────────────────────────────────────── */
 function startCaptionsObserver() {
-  // Tear down any existing observer
-  if (captionsObserver) { try { captionsObserver.disconnect(); } catch(e){} captionsObserver = null; }
-
-  captionSegments.clear();
-  lastSnapshotKey = '';
-  isCapturingCaptions = true;
-
-  injectCaptionsOverlayStyle();
-
-  // Try enabling CC immediately and again after a short delay (Meet may not be ready)
-  ensureCaptionsEnabled();
-  setTimeout(ensureCaptionsEnabled, 2000);
-  setTimeout(ensureCaptionsEnabled, 5000);
-
-  // Debounced MutationObserver — captures every live text change
-  captionsObserver = new MutationObserver(() => {
-    if (!isCapturingCaptions) return;
-    if (captionsDebounce) clearTimeout(captionsDebounce);
-    captionsDebounce = setTimeout(processCaptionsDOM, 80); // 80ms debounce balances responsiveness vs redundancy
-  });
-
-  captionsObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-    characterDataOldValue: false
-  });
-
-  // Periodic safety poll — catches captions that slipped through observer
-  const captionsPollInterval = setInterval(() => {
-    if (!isCapturingCaptions) { clearInterval(captionsPollInterval); return; }
-    processCaptionsDOM();
-  }, 500);
-
-  console.log('[MeetScribe] Real-time captions observer started ✓');
+  // Captions observer disabled in favor of direct high-definition audio AI processing
+  isCapturingCaptions = false;
+  console.log('[MeetScribe] Direct audio recording active (CC scraping bypassed) ✓');
 }
 
 function stopCaptionsObserver() {
@@ -446,11 +446,22 @@ function getFormattedCaptions() {
     }
   }
 
-  const rawTranscript = merged.map(u => `[${u.speaker}]: ${u.text}`).join('\n');
   const participants  = Array.from(new Set([
     ...Array.from(uniqueSpeakersSet),
     ...extractParticipantNames().allParticipants
-  ])).filter(Boolean);
+  ])).filter(p => p && !['Participant', 'Speaker', 'You', 'آپ'].includes(p));
+
+  // If we have verified participant names and some utterances still have generic labels, resolve them
+  const primaryName = participants.length === 1 ? participants[0] : (discoveredSelfName || '');
+  if (primaryName) {
+    merged.forEach(u => {
+      if (!u.speaker || ['Participant', 'Speaker', 'You', 'آپ'].includes(u.speaker)) {
+        u.speaker = primaryName;
+      }
+    });
+  }
+
+  const rawTranscript = merged.map(u => `[${u.speaker}]: ${u.text}`).join('\n');
 
   console.log(`[MeetScribe] Final transcript: ${merged.length} utterances, ${rawTranscript.length} chars`);
   return { rawTranscript, utterances: merged, participants };
@@ -462,22 +473,45 @@ function getMeetMicStatus() {
     const muted = btn.getAttribute('data-is-muted');
     const lbl   = (btn.getAttribute('aria-label') || '').toLowerCase();
     const tip   = (btn.getAttribute('data-tooltip') || '').toLowerCase();
+    const title = (btn.getAttribute('title') || '').toLowerCase();
+
+    // Check inner text or icons (Google Meet often renders 'mic_off' or 'mic')
+    const iconEl = btn.querySelector('i, span, [class*="google-material-icons"]');
+    const iconText = iconEl ? (iconEl.textContent || '').trim().toLowerCase() : '';
 
     const isMic = lbl.includes('microphone') || lbl.includes('mic') ||
       lbl.includes('مائیک') || tip.includes('microphone') || tip.includes('mic') ||
       tip.includes('ctrl + d') || tip.includes('ctrl+d') ||
-      lbl.includes('ctrl + d') || lbl.includes('ctrl+d');
+      lbl.includes('ctrl + d') || lbl.includes('ctrl+d') ||
+      title.includes('mic') || iconText === 'mic' || iconText === 'mic_off';
+
+    // Must NOT be camera button
+    const isCamera = lbl.includes('camera') || tip.includes('camera') || lbl.includes('ctrl + e') || tip.includes('ctrl+e');
+    if (isCamera) continue;
 
     if (!isMic) continue;
     if (muted === 'true')  return true;
     if (muted === 'false') return false;
-    if (lbl.includes('turn on') || lbl.includes('unmute') || lbl.includes('is off') || lbl.includes('is muted') || tip.includes('turn on')) return true;
-    if (lbl.includes('turn off') || lbl.includes('is on') || tip.includes('turn off')) return false;
+    if (iconText === 'mic_off') return true;
+    if (iconText === 'mic') return false;
+    if (lbl.includes('turn on') || lbl.includes('unmute') || lbl.includes('is off') || lbl.includes('is muted') || tip.includes('turn on') || lbl.includes('آن کریں')) return true;
+    if (lbl.includes('turn off') || lbl.includes('is on') || tip.includes('turn off') || lbl.includes('بند کریں')) return false;
   }
 
-  if (document.querySelector('[data-self-name] [data-is-muted="true"], [aria-label*="(You)"] [data-is-muted="true"]')) return true;
+  // Check self-tile mic indicator
+  const selfTileMuted = document.querySelector('[data-self-name] [data-is-muted="true"], [aria-label*="(You)"] [data-is-muted="true"], [aria-label*="(آپ)"] [data-is-muted="true"]');
+  if (selfTileMuted) return true;
+
+  const selfTileUnmuted = document.querySelector('[data-self-name] [data-is-muted="false"], [aria-label*="(You)"] [data-is-muted="false"]');
+  if (selfTileUnmuted) return false;
+
   const anyMuted = document.querySelector('button[data-is-muted="true"], div[data-is-muted="true"]');
-  if (anyMuted && (anyMuted.closest('div[role="region"], nav, footer') || anyMuted.tagName === 'BUTTON')) return true;
+  if (anyMuted && (anyMuted.closest('div[role="region"], nav, footer') || anyMuted.tagName === 'BUTTON')) {
+    const lbl = (anyMuted.getAttribute('aria-label') || '').toLowerCase();
+    if (!lbl.includes('camera') && !lbl.includes('video') && !lbl.includes('ctrl + e')) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -572,9 +606,17 @@ function initObserver() {
   });
 
   window.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) setTimeout(triggerStateCheck, 20);
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+      setTimeout(triggerStateCheck, 40);
+      setTimeout(triggerStateCheck, 180);
+      setTimeout(triggerStateCheck, 450);
+    }
   });
-  window.addEventListener('click', () => setTimeout(triggerStateCheck, 20));
+  window.addEventListener('click', () => {
+    setTimeout(triggerStateCheck, 40);
+    setTimeout(triggerStateCheck, 180);
+    setTimeout(triggerStateCheck, 450);
+  });
 
   pollInterval = setInterval(() => {
     if (!isContextValid()) { cleanUpScript(); return; }
