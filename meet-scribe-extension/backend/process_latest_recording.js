@@ -59,7 +59,7 @@ async function processLatestRecording() {
     const genAI = new GoogleGenerativeAI(geminiKey);
     const fileBuffer = fs.readFileSync(audioPath);
     const base64Audio = fileBuffer.toString('base64');
-    const audioModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+    const audioModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash'].filter(Boolean))];
 
 function stripSpeakerTags(str) {
   if (!str || typeof str !== 'string') return '';
@@ -156,7 +156,7 @@ Format the output as clean, continuous, natural plain text with clear paragraph 
 
   if (hasGemini) {
     const genAI = new GoogleGenerativeAI(geminiKey);
-    const structModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+    const structModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash'].filter(Boolean))];
 
     for (const modelName of structModels) {
       try {
@@ -200,10 +200,10 @@ Output JSON schema:
   // Fallback to Groq LLM if Gemini failed
   if (!jsonText && hasGroq) {
     try {
-      console.log('⚡ Structuring with Groq LLaMA 3.3 70B...');
+      console.log('⚡ Structuring with Groq GPT-OSS 20B...');
       const groq = new Groq({ apiKey: groqKey });
       const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
+        model: 'openai/gpt-oss-20b',
         messages: [
           {
             role: 'system',

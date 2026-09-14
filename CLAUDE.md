@@ -37,7 +37,7 @@ Copy `.env.example` to `.env` in `meet-scribe-extension/backend/`:
 PORT=3001
 GEMINI_API_KEY=your_gemini_api_key_here   # Primary AI — required
 GROQ_API_KEY=your_groq_api_key_here       # Optional fallback
-GEMINI_MODEL=gemini-2.5-flash             # Optional model override
+GEMINI_MODEL=gemini-3.6-flash             # Optional model override
 ```
 
 ## Installing the Chrome Extension
@@ -78,7 +78,7 @@ meet-scribe-extension/
 
 ### Backend AI Pipeline (server.js)
 
-- **Primary path (`/api/process-captions`)**: Receives caption text from the extension, formats it with Gemini (`gemini-2.5-flash` → `gemini-2.0-flash` → `gemini-1.5-*` cascade)
+- **Primary path (`/api/process-captions`)**: Receives caption text from the extension, formats it with Gemini (`gemini-3.6-flash`, or the configured `GEMINI_MODEL`)
 - **Audio path (`/api/process-meeting`)**: Receives `.webm` audio via multipart upload; tries Gemini direct multimodal audio, falls back to Groq Whisper Large v3 STT then Gemini text formatting
 - **`sanitizePlainMeetingNotes()`** post-processes all AI output to strip any speaker tags that leaked through
 - API keys can be passed per-request via `X-Gemini-API-Key` / `X-Groq-API-Key` headers (extension sends user's keys from `chrome.storage.local`) or from server `.env`

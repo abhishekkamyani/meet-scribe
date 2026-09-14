@@ -12,6 +12,42 @@ const { GoogleAIFileManager, FileState } = require('@google/generative-ai/server
 // Gemini's inline-base64 request path has a hard ~20MB ceiling; anything larger
 // must go through the File API (upload once, reference by URI).
 const GEMINI_INLINE_LIMIT_BYTES = 15 * 1024 * 1024;
+const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+const GROQ_TEXT_MODEL_CANDIDATES = [
+  'openai/gpt-oss-20b',
+  'openai/gpt-oss-120b',
+  'qwen/qwen3.6-27b'
+];
+
+function geminiModelCandidates() {
+  return [...new Set([
+    process.env.GEMINI_MODEL,
+    DEFAULT_GEMINI_MODEL
+  ].filter(Boolean))];
+}
+
+function isTransientProviderError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  const status = Number(error?.status || error?.statusCode || 0);
+  return status === 408 || status === 429 || status >= 500 ||
+    /fetch failed|connection error|econnreset|etimedout|enotfound|socket hang up|network error/.test(message);
+}
+
+async function retryTransientProviderRequest(label, request, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await request();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientProviderError(error) || attempt === attempts) break;
+      const delayMs = attempt * 1000;
+      console.warn(`${label} failed due to a temporary connection error; retrying in ${delayMs / 1000}s (${attempt}/${attempts - 1})...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -121,14 +157,7 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
   }
 
   const genAI = new GoogleGenerativeAI(activeGeminiKey);
-  const userConfiguredModel = process.env.GEMINI_MODEL;
-  const modelCandidates = [
-    ...(userConfiguredModel ? [userConfiguredModel] : []),
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro'
-  ];
+  const modelCandidates = geminiModelCandidates();
 
   const systemInstruction = `You are an expert bilingual Urdu/English meeting scribe. Your ONLY job is to faithfully format and translate the meeting content you receive into plain, clean text. You do NOT summarize, invent, hallucinate, or add any content not present in the input.
 
@@ -182,7 +211,10 @@ OUTPUT JSON (strict schema, no extra keys):
 Format it into plain bilingual transcripts and action items strictly excluding any speaker names or tags.
 Note: The spoken dialogue is Pakistani/Indian corporate/tech Urdish (software development, web, UI/UX, tech, or business). Fix any obvious phonetic speech-to-text misrecognitions (for example: "UI" or "یو آئی" should not be transcribed as "اوائی"; "desktop / screen" should not be confused with "موسیقی").
 Do NOT add, remove, or alter the meaning.\n\n---\n${rawTranscript}\n---\n\nReturn JSON only.`;
-      const result = await model.generateContent(prompt);
+      const result = await retryTransientProviderRequest(
+        `[Backend Gemini] ${modelName}`,
+        () => model.generateContent(prompt)
+      );
       const response = await result.response;
       const responseText = response.text().trim();
 
@@ -221,13 +253,7 @@ async function processCaptionsWithGroq(rawTranscript, participants = [], clientG
   const groq = new Groq({ apiKey: activeGroqKey });
 
   // Try multiple Groq models in order — free tier may not have access to all
-  const groqModelCandidates = [
-    'llama-3.3-70b-versatile',
-    'llama3-70b-8192',
-    'llama-3.1-70b-versatile',
-    'mixtral-8x7b-32768',
-    'llama3-8b-8192'
-  ];
+  const groqModelCandidates = GROQ_TEXT_MODEL_CANDIDATES;
 
   const messages = [
     {
@@ -246,12 +272,15 @@ Strictly DO NOT include any speaker names or speaker tags. Provide plain continu
   for (const model of groqModelCandidates) {
     try {
       console.log(`[Backend Groq LLM] Trying model: ${model}...`);
-      const completion = await groq.chat.completions.create({
-        messages,
-        model,
-        temperature: 0.1,
-        response_format: { type: 'json_object' }
-      });
+      const completion = await retryTransientProviderRequest(
+        `[Backend Groq LLM] ${model}`,
+        () => groq.chat.completions.create({
+          messages,
+          model,
+          temperature: 0.1,
+          response_format: { type: 'json_object' }
+        })
+      );
       const content = completion.choices[0]?.message?.content || '{}';
       return sanitizePlainMeetingNotes(JSON.parse(content));
     } catch (groqModelErr) {
@@ -370,6 +399,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
 
   try {
     let structuredOutput = null;
+    let lastTranscriptionError = null;
 
     // Strategy 1: Google Gemini Direct Multimodal Audio AI (Highest fidelity for Urdu/English)
     const effectiveGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
@@ -400,14 +430,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
         audioPart = { inlineData: { mimeType: 'audio/webm', data: fileBuffer.toString('base64') } };
       }
 
-      const userConfiguredModel = process.env.GEMINI_MODEL;
-      const audioModelCandidates = [
-        ...(userConfiguredModel ? [userConfiguredModel] : []),
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro'
-      ];
+      const audioModelCandidates = geminiModelCandidates();
 
       const audioSystemInstruction = `You are an expert bilingual Urdu and English executive scribe.
 Listen carefully to this meeting audio recording and produce a complete, authentic, verbatim bilingual record with concrete action items.
@@ -462,10 +485,13 @@ OUTPUT JSON (strict schema, no extra keys):
             systemInstruction: audioSystemInstruction
           });
 
-          const result = await model.generateContent([
-            `Please listen carefully to this meeting audio recording and generate the plain bilingual meeting notes (strictly excluding speaker names) according to the system instructions. Return JSON only.`,
-            audioPart
-          ]);
+          const result = await retryTransientProviderRequest(
+            `[MeetScribe Audio] Gemini Audio (${modelName})`,
+            () => model.generateContent([
+              `Please listen carefully to this meeting audio recording and generate the plain bilingual meeting notes (strictly excluding speaker names) according to the system instructions. Return JSON only.`,
+              audioPart
+            ])
+          );
 
           const response = await result.response;
           const responseText = (response.text() || '').trim();
@@ -483,6 +509,7 @@ OUTPUT JSON (strict schema, no extra keys):
           }
         } catch (geminiAudioErr) {
           console.warn(`[MeetScribe Audio] Gemini Audio (${modelName}) attempt failed:`, geminiAudioErr.message);
+          lastTranscriptionError = geminiAudioErr;
         }
       }
 
@@ -504,14 +531,17 @@ OUTPUT JSON (strict schema, no extra keys):
         try {
           console.log('[MeetScribe Audio] Falling back to Groq Whisper Large v3...');
           const groq = new Groq({ apiKey: effectiveGroqKey });
-          const transcription = await groq.audio.transcriptions.create({
-            file: fs.createReadStream(filePath),
-            model: 'whisper-large-v3',
-            language: 'ur',
-            response_format: 'verbose_json',
-            temperature: 0.0,
-            prompt: 'یہ ایک تکنیکی میٹنگ کی ہائی کوالٹی اردو اور انگریزی گفتگو ہے۔ الفاظ: ٹھیک ہے، ماڈیولز، ڈیپلائمنٹ، اسپیڈ، پیجز، لوڈ، UI، UX، رسپانسو، ڈیسک ٹاپ، موبائل۔'
-          });
+          const transcription = await retryTransientProviderRequest(
+            '[MeetScribe Audio] Groq Whisper',
+            () => groq.audio.transcriptions.create({
+              file: fs.createReadStream(filePath),
+              model: 'whisper-large-v3',
+              language: 'ur',
+              response_format: 'verbose_json',
+              temperature: 0.0,
+              prompt: 'یہ ایک تکنیکی میٹنگ کی ہائی کوالٹی اردو اور انگریزی گفتگو ہے۔ الفاظ: ٹھیک ہے، ماڈیولز، ڈیپلائمنٹ، اسپیڈ، پیجز، لوڈ، UI، UX، رسپانسو، ڈیسک ٹاپ، موبائل۔'
+            })
+          );
           rawText = transcription.text ? transcription.text.trim() : '';
 
           // Scrub common Whisper silence hallucinations
@@ -523,10 +553,14 @@ OUTPUT JSON (strict schema, no extra keys):
           }
         } catch (whisperErr) {
           console.warn('[MeetScribe Audio] Groq Whisper fallback error:', whisperErr.message);
+          lastTranscriptionError = whisperErr;
         }
       }
 
       if (!rawText) {
+        if (lastTranscriptionError && isTransientProviderError(lastTranscriptionError)) {
+          throw new Error('Could not transcribe audio because Gemini and Groq could not be reached after retrying. Please check your internet connection and try this recording again.');
+        }
         throw new Error('Could not transcribe audio. Please ensure your Gemini API Key or Groq API Key is configured in settings.');
       }
 
