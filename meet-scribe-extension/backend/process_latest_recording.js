@@ -166,25 +166,25 @@ Format the output as clean, continuous, natural plain text with clear paragraph 
             temperature: 0.1,
             responseMimeType: 'application/json'
           },
-          systemInstruction: `You are a world-class bilingual executive scribe for Urdu and English (Urdish).
-Convert raw dialogue into polished plain bilingual transcripts and action items.
+          systemInstruction: `You are an exact bilingual Urdu/English meeting transcriber.
+Convert raw dialogue into a verbatim Urdu/Urdish transcript, a faithful English translation, and action items.
 Rules:
 - Strictly NO speaker names, labels, or tags anywhere in the output.
-- Authentic Urdu script (نستعلیق / اردو رسم الخط) with natural punctuation and paragraph breaks.
+- transcript_urdu must preserve what was said exactly: do not correct Urdu grammar, paraphrase, polish, summarize, reorder, or omit repetitions. Only add punctuation and paragraph breaks.
 - Preserve UI/UX, web, software, and data technical vocabulary accurately (UI, responsive, mobile, desktop, layout, components).
-- English transcript must be accurate professional English translation without speaker names.
-- Action items: clean bullet points of tasks/decisions WITHOUT person names or assignments.
+- transcript_english must be a faithful English translation in the original order. Correct English grammar, spelling, and punctuation only; do not polish or change the meaning or detail.
+- Action items must be bullet points containing only explicit tasks/decisions, without person names or assignments.
 Output JSON schema:
 {
-  "transcript_urdu": "Full plain dialogue/paragraphs in Urdu script without speaker names",
-  "transcript_english": "Full plain dialogue translation in English without speaker names",
+  "transcript_urdu": "Verbatim Urdu/Urdish dialogue in Urdu script without speaker names",
+  "transcript_english": "Faithful English translation with grammar corrected only, without speaker names",
   "action_items_urdu": "Bullet-pointed tasks in Urdu without person names",
-  "action_items_english_improved": "Polished business English action items without person names"
+  "action_items_english_improved": "Bullet-pointed explicit tasks and decisions in English without person names"
 }`
         });
 
         const structRes = await structModel.generateContent(
-          `Here is the raw transcribed meeting dialogue:\n\n${rawDialogue}\n\nFormat into plain bilingual transcripts and action items strictly excluding speaker names adhering to schema.`
+          `Here is the raw transcribed meeting dialogue:\n\n${rawDialogue}\n\nCreate a verbatim Urdu/Urdish transcript, a faithful English translation with grammar corrected only, and bullet-point action items. Strictly exclude speaker names and follow the schema.`
         );
         jsonText = structRes.response.text().trim()
           .replace(/^```json\s*/i, '')
@@ -207,8 +207,8 @@ Output JSON schema:
         messages: [
           {
             role: 'system',
-            content: `You are an expert bilingual Urdu/English meeting scribe.
-Generate plain bilingual transcripts and action items strictly without speaker names.
+            content: `You are an exact bilingual Urdu/English meeting transcriber.
+Return a verbatim Urdu/Urdish transcript: do not correct Urdu grammar, paraphrase, polish, summarize, reorder, or omit detail. Return a faithful English translation in the original order: correct English grammar, spelling, and punctuation only, without polishing or changing meaning. Action items must be bullet points containing only explicit tasks or decisions, without names.
 Schema:
 {
   "transcript_urdu": "string",

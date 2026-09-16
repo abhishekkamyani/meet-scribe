@@ -159,7 +159,7 @@ async function processCaptionsWithGemini(rawTranscript, participants = [], clien
   const genAI = new GoogleGenerativeAI(activeGeminiKey);
   const modelCandidates = geminiModelCandidates();
 
-  const systemInstruction = `You are an expert bilingual Urdu/English meeting scribe. Your ONLY job is to faithfully format and translate the meeting content you receive into plain, clean text. You do NOT summarize, invent, hallucinate, or add any content not present in the input.
+  const systemInstruction = `You are an exact bilingual Urdu/English meeting transcriber. Your ONLY job is to preserve the meeting conversation and create faithful transcripts. You do NOT summarize, paraphrase, rewrite, invent, or add content.
 
 MANDATORY RULES — VIOLATING ANY IS UNACCEPTABLE:
 
@@ -167,29 +167,28 @@ MANDATORY RULES — VIOLATING ANY IS UNACCEPTABLE:
    - Do NOT include any speaker names, labels, or tags anywhere in the output (e.g. do NOT output "[Speaker Name]:", "[Speaker]:", "[Person]:", "[You]:", or name prefixes).
    - Provide clean, continuous, natural plain content without attributing who said what.
 
-2. AUTHENTIC & PROFESSIONAL URDU (transcript_urdu):
-   - Language is Pakistani/Indian URDU (اردو رسم الخط / نستعلیق), NOT Arabic.
-   - Use natural Urdu vocabulary: السلام علیکم, ہیلو, جی, ٹھیک ہے, کیا حال ہے, آپ, ہم, وہ
-   - Technical English terms stay natural in Urdu (e.g. "سمپل امپیوٹر", "پائپ لائن", "کالم ٹرانسفارمر", "کراس ویلیڈیشن", "نل ویلیوز" or natural transliteration).
-   - FORMATTING: Ensure the Urdu text is well-formatted with proper punctuation (ختمہ، سکتہ), clear sentence breaks, and readable paragraphs.
+2. VERBATIM URDU TRANSCRIPT (transcript_urdu):
+   - Capture the conversation in Pakistani/Indian Urdu script (اردو رسم الخط / نستعلیق), exactly as spoken.
+   - Do NOT correct Urdu grammar, improve wording, paraphrase, summarize, reorder, combine, omit repetitions, or add explanation.
+   - Preserve Urdish and technical words as spoken (for example UI, API, frontend, ڈیسک ٹاپ). Only add sentence breaks and punctuation where needed for readability.
    - Strictly NO speaker names or tags.
 
-3. ACCURATE ENGLISH TRANSLATION (transcript_english):
-   - Clean, accurate, professional, and faithful English translation of the spoken content.
-   - Preserve technical machine learning, data science, and domain terms with accuracy.
-   - Format into clean, readable paragraphs.
+3. FAITHFUL ENGLISH TRANSCRIPT (transcript_english):
+   - Translate every part of the conversation into English in the same order and with the same meaning.
+   - Correct only English grammar, spelling, and punctuation. Do NOT polish, summarize, reword, make it more professional, or change the level of detail.
+   - Preserve technical terms and repetitions when they were spoken.
    - Strictly NO speaker names or tags.
 
 4. ACTION ITEMS WITHOUT NAMES:
-   - Extract real, specific tasks and decisions discussed.
+   - Extract only real, explicit tasks and decisions discussed; never invent or infer tasks.
    - Format: "• [Specific task or decision]"
    - Strictly do NOT assign or prefix with person names (e.g. do NOT write "• [Person]: task", just write "• [Specific task]").
    - If no action items were discussed: "• No specific action items were identified."
 
 OUTPUT JSON (strict schema, no extra keys):
 {
-  "transcript_urdu": "Plain continuous Urdu dialogue/paragraphs in Urdu script without speaker names.",
-  "transcript_english": "Plain continuous English translation/paragraphs without speaker names.",
+  "transcript_urdu": "Verbatim Urdu/Urdish conversation in Urdu script without speaker names.",
+  "transcript_english": "Faithful English translation with grammar corrected only, without speaker names.",
   "action_items_urdu": "Bullet list of real tasks in Urdu without person names, or empty state.",
   "action_items_english_improved": "Bullet list of real tasks in English without person names, or empty state."
 }`;
@@ -208,7 +207,7 @@ OUTPUT JSON (strict schema, no extra keys):
       });
 
       const prompt = `Below is the meeting content transcribed from audio.
-Format it into plain bilingual transcripts and action items strictly excluding any speaker names or tags.
+Format it into a verbatim Urdu/Urdish transcript, a faithful English translation with grammar corrected only, and bullet-point action items. Strictly exclude speaker names or tags.
 Note: The spoken dialogue is Pakistani/Indian corporate/tech Urdish (software development, web, UI/UX, tech, or business). Fix any obvious phonetic speech-to-text misrecognitions (for example: "UI" or "یو آئی" should not be transcribed as "اوائی"; "desktop / screen" should not be confused with "موسیقی").
 Do NOT add, remove, or alter the meaning.\n\n---\n${rawTranscript}\n---\n\nReturn JSON only.`;
       const result = await retryTransientProviderRequest(
@@ -258,13 +257,13 @@ async function processCaptionsWithGroq(rawTranscript, participants = [], clientG
   const messages = [
     {
       role: 'system',
-      content: `You are a bilingual Urdu/English meeting notes assistant.
+      content: `You are an exact bilingual Urdu/English meeting transcriber.
 Return ONLY valid JSON with keys: "transcript_urdu", "transcript_english", "action_items_urdu", "action_items_english_improved".
-Strictly DO NOT include any speaker names or speaker tags. Provide plain continuous paragraphs for transcripts and bullet points without person names for action items. Spoken language is Urdu/English, NOT Arabic.`
+Strictly DO NOT include any speaker names or speaker tags. Keep transcript_urdu verbatim: do not paraphrase, correct Urdu grammar, summarize, reorder, or omit details. Make transcript_english a faithful English translation; correct English grammar, spelling, and punctuation only, without polishing or changing meaning. Action items must be bullets containing only explicit tasks or decisions, without names. Spoken language is Urdu/English, NOT Arabic.`
     },
     {
       role: 'user',
-      content: `Format this meeting content into plain bilingual transcripts and action items (strictly excluding speaker names):\n\n${rawTranscript}`
+      content: `Create a verbatim Urdu/Urdish transcript, a faithful English translation with grammar corrected only, and bullet-point action items from this meeting content (strictly excluding speaker names):\n\n${rawTranscript}`
     }
   ];
 
@@ -433,7 +432,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
       const audioModelCandidates = geminiModelCandidates();
 
       const audioSystemInstruction = `You are an expert bilingual Urdu and English executive scribe.
-Listen carefully to this meeting audio recording and produce a complete, authentic, verbatim bilingual record with concrete action items.
+Listen carefully to this meeting audio recording and produce a complete, verbatim Urdu/Urdish record, a faithful English translation, and concrete action items.
 
 MEETING DOMAIN & VOCABULARY:
 - Spoken language is Pakistani/Indian corporate and technical Urdu mixed with English (Urdish).
@@ -448,27 +447,27 @@ MANDATORY RULES:
    - Every paragraph must start directly with the spoken words.
    - Provide clean, continuous, natural plain content without attributing who said what.
 
-2. AUTHENTIC & ACCURATE URDU SCRIPT (transcript_urdu):
-   - Transcribe all spoken Urdu and English dialogue verbatim in authentic Urdu script (اردو رسم الخط / نستعلیق).
-   - Format with proper punctuation (ختمہ، سکتہ) and clear, readable paragraphs.
+2. VERBATIM URDU TRANSCRIPT (transcript_urdu):
+   - Transcribe the entire spoken Urdu/Urdish conversation exactly as spoken in Urdu script (اردو رسم الخط / نستعلیق).
+   - Do NOT correct Urdu grammar, paraphrase, polish, summarize, reorder, remove repetitions, or add information. Only add paragraph breaks and punctuation for readability.
    - Strictly NO speaker names or tags.
 
-3. ACCURATE PROFESSIONAL ENGLISH TRANSLATION (transcript_english):
-   - Clean, professional, faithful English translation of what was spoken.
-   - Retain full technical domain accuracy (e.g. "make its UI responsive on mobile and desktop").
-   - Format into clean, readable paragraphs.
+3. FAITHFUL ENGLISH TRANSCRIPT (transcript_english):
+   - Translate every spoken part faithfully into English, in the original order.
+   - Correct only English grammar, spelling, and punctuation. Do NOT make the content professional, polished, shorter, clearer, or otherwise different from what was said.
+   - Retain full technical domain accuracy and all relevant detail.
    - Strictly NO speaker names or tags.
 
 4. ACTION ITEMS WITHOUT NAMES (action_items_urdu & action_items_english_improved):
-   - Extract real, specific tasks and decisions discussed in the audio.
+   - Extract only real, explicit tasks and decisions discussed in the audio; do not infer or invent any.
    - Format: "• [Specific task or decision]"
    - Strictly do NOT assign to or prefix with speaker/person names.
    - If no specific action items were discussed: "• No specific action items were identified."
 
 OUTPUT JSON (strict schema, no extra keys):
 {
-  "transcript_urdu": "Plain continuous Urdu dialogue and paragraphs in Urdu script without speaker names.",
-  "transcript_english": "Plain continuous English translation and paragraphs without speaker names.",
+  "transcript_urdu": "Verbatim Urdu/Urdish conversation in Urdu script without speaker names.",
+  "transcript_english": "Faithful English translation with grammar corrected only, without speaker names.",
   "action_items_urdu": "Bullet list of real tasks in Urdu without person names, or empty state.",
   "action_items_english_improved": "Bullet list of real tasks in English without person names, or empty state."
 }`;
