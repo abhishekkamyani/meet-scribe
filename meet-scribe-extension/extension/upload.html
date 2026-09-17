@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeetScribe Urdu - Reprocess Audio Recording</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    body {
+      width: 100% !important;
+      height: 100vh !important;
+      max-height: none !important;
+      overflow-y: auto !important;
+      user-select: text !important;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      background-color: var(--bg-main);
+      padding: 24px;
+    }
+    .page-container {
+      max-width: 720px;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .dropzone {
+      border: 2px dashed var(--border-color);
+      border-radius: 12px;
+      padding: 36px 20px;
+      text-align: center;
+      background-color: var(--bg-card);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--primary);
+      background-color: var(--bg-card-hover);
+    }
+    .dropzone-icon {
+      font-size: 42px;
+      margin-bottom: 12px;
+    }
+    .dropzone-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-main);
+      margin-bottom: 6px;
+    }
+    .dropzone-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .file-details {
+      margin-top: 14px;
+      padding: 10px 14px;
+      background: var(--bg-inner);
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      font-size: 13px;
+      color: var(--primary);
+      font-weight: 500;
+      display: inline-block;
+    }
+    .results-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="page-container">
+    <!-- Header -->
+    <header class="app-header" style="border-radius: 12px;">
+      <div class="brand-wrapper">
+        <div class="brand-icon">🎙️</div>
+        <div>
+          <div class="brand-title">
+            <span>MeetScribe</span>
+            <span class="badge-tag">Reprocessor</span>
+          </div>
+          <div class="brand-urdu">میٹ اسکرائب اردو — آڈیو فائل پروسیسنگ</div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div id="backend-status-badge" class="status-badge">
+          <span id="status-dot" class="status-dot"></span>
+          <span id="status-text">Checking...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Card -->
+    <div class="info-card" style="flex-direction: column; align-items: stretch; gap: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="font-size: 16px; font-weight: 600;">📁 Upload Meeting Audio Recording</h2>
+        <span class="pill-badge">Local &amp; Offline Ready</span>
+      </div>
+      
+      <p style="font-size: 13px; color: var(--text-muted);">
+        Select or drag &amp; drop any saved audio recording (<code>0_meeting_audio.webm</code>, <code>.mp3</code>, <code>.wav</code>, <code>.m4a</code>) to generate verbatim Urdu/English transcripts and action items files.
+      </p>
+
+      <!-- Dropzone -->
+      <div id="dropzone" class="dropzone">
+        <div class="dropzone-icon">📂</div>
+        <div id="dropzone-title" class="dropzone-title">Click to select audio file or drag &amp; drop here</div>
+        <div class="dropzone-subtitle">Supports 0_meeting_audio.webm, WebM, MP3, WAV, M4A, OGG</div>
+        <div id="file-details" class="file-details hidden"></div>
+      </div>
+      <input type="file" id="audio-file-input" accept="audio/*,.webm,.mp3,.wav,.m4a,.ogg" style="display: none;">
+
+      <!-- API Keys Accordion / Quick Check -->
+      <div style="background: var(--bg-inner); padding: 14px; border-radius: 8px; border: 1px solid var(--border-subtle);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-size: 12px; font-weight: 600; color: var(--text-muted);">🔑 Gemini API Key Status</span>
+          <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style="font-size: 12px; color: var(--accent-teal);">Get Free Key ↗</a>
+        </div>
+        <input type="password" id="gemini-key-input" class="input-text" placeholder="Enter Gemini API Key (or set GEMINI_API_KEY in backend .env)" autocomplete="off">
+      </div>
+
+      <!-- Action Button -->
+      <button id="process-audio-btn" class="btn-primary" disabled style="padding: 14px;">
+        <span>⚡</span>
+        <span>Upload &amp; Generate Notes</span>
+      </button>
+
+      <!-- Status Alert -->
+      <div id="status-box" class="alert-banner hidden" style="margin-top: 4px;">
+        <span id="status-icon" class="alert-icon">⏳</span>
+        <div class="alert-content">
+          <div id="status-title" class="alert-title">Processing Audio</div>
+          <div id="status-desc" class="alert-desc-keys">Transcribing recording with Gemini AI...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Complete View / Results -->
+    <div id="view-complete" class="results-card hidden">
+      <!-- Success Banner -->
+      <div class="success-banner" style="margin-bottom: 16px;">
+        <div>
+          <div class="success-title">🎉 Meeting Notes Saved!</div>
+          <div class="success-desc">4 structured UTF-8 text files saved to your Downloads folder</div>
+        </div>
+        <button id="download-all-btn" class="btn-small btn-redownload">
+          Re-download All
+        </button>
+      </div>
+
+      <!-- Tabs Navigation -->
+      <div class="tabs-nav">
+        <button id="tab-btn-ur-trans" class="tab-btn active">Urdu Trans</button>
+        <button id="tab-btn-en-trans" class="tab-btn">Eng Trans</button>
+        <button id="tab-btn-ur-act" class="tab-btn">Urdu Actions</button>
+        <button id="tab-btn-en-act" class="tab-btn">Eng Actions</button>
+      </div>
+
+      <!-- Preview Content Area -->
+      <div class="preview-box">
+        <button id="copy-tab-content-btn" class="copy-btn" title="Copy to Clipboard">
+          <span>📋</span> <span id="copy-btn-text">Copy</span>
+        </button>
+
+        <div id="tab-content-ur-trans" class="preview-urdu preview-pre-line">Loading...</div>
+        <div id="tab-content-en-trans" class="preview-eng-trans hidden">Loading...</div>
+        <div id="tab-content-ur-act" class="preview-urdu preview-actions-urdu hidden">Loading...</div>
+        <div id="tab-content-en-act" class="preview-actions-eng hidden">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="upload.js"></script>
+</body>
+</html>

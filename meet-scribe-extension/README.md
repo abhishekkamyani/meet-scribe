@@ -89,6 +89,15 @@ The backend will start at `http://localhost:3000`.
 
 ---
 
+## 📁 Manual Audio Reprocessing (Upload Any Recording)
+
+If you need to reprocess a saved audio recording (`0_meeting_audio.webm` or any `.webm`, `.mp3`, `.wav`, `.m4a` file) without starting a live meeting call:
+1. **Extension Popup**: Click **"Reprocess Audio File"** (📁) on the extension popup home screen or error view to select and process your audio file.
+2. **Web Browser Interface**: Navigate to `http://localhost:3001/upload` in your browser for a drag-and-drop web uploader that generates and previews all 4 notes files.
+3. **CLI Reprocessing Tool**: Run `npm run reprocess` inside `meet-scribe-extension/backend/` to automatically reprocess the latest meeting recording from your Downloads folder, or pass a specific path: `node process_latest_recording.js /path/to/recording.webm`.
+
+---
+
 ## ⚙️ Key Technical Highlights
 
 - **Direct Multimodal Audio AI**: Generates complete bilingual notes directly from the recorded audio using Gemini Audio AI, avoiding fragile DOM caption scraping.

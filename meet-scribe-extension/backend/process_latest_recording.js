@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 require('dotenv').config();
+const dns = require('dns');
+try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -59,7 +61,7 @@ async function processLatestRecording() {
     const genAI = new GoogleGenerativeAI(geminiKey);
     const fileBuffer = fs.readFileSync(audioPath);
     const base64Audio = fileBuffer.toString('base64');
-    const audioModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash'].filter(Boolean))];
+    const audioModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.0-flash', 'gemini-2.5-flash'].filter(Boolean))];
 
 function stripSpeakerTags(str) {
   if (!str || typeof str !== 'string') return '';
@@ -156,7 +158,7 @@ Format the output as clean, continuous, natural plain text with clear paragraph 
 
   if (hasGemini) {
     const genAI = new GoogleGenerativeAI(geminiKey);
-    const structModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash'].filter(Boolean))];
+    const structModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.0-flash', 'gemini-2.5-flash'].filter(Boolean))];
 
     for (const modelName of structModels) {
       try {
@@ -200,14 +202,18 @@ Output JSON schema:
   // Fallback to Groq LLM if Gemini failed
   if (!jsonText && hasGroq) {
     try {
-      console.log('⚡ Structuring with Groq GPT-OSS 20B...');
+      console.log('⚡ Structuring with Groq LLaMA models...');
       const groq = new Groq({ apiKey: groqKey });
-      const completion = await groq.chat.completions.create({
-        model: 'openai/gpt-oss-20b',
-        messages: [
-          {
-            role: 'system',
-            content: `You are an exact bilingual Urdu/English meeting transcriber.
+      const groqCandidates = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768'];
+      for (const model of groqCandidates) {
+        try {
+          console.log(`⚡ Trying Groq model: ${model}...`);
+          const completion = await groq.chat.completions.create({
+            model,
+            messages: [
+              {
+                role: 'system',
+                content: `You are an exact bilingual Urdu/English meeting transcriber.
 Return a verbatim Urdu/Urdish transcript: do not correct Urdu grammar, paraphrase, polish, summarize, reorder, or omit detail. Return a faithful English translation in the original order: correct English grammar, spelling, and punctuation only, without polishing or changing meaning. Action items must be bullet points containing only explicit tasks or decisions, without names.
 Schema:
 {
@@ -216,16 +222,21 @@ Schema:
   "action_items_urdu": "string",
   "action_items_english_improved": "string"
 }`
-          },
-          {
-            role: 'user',
-            content: `Meeting dialogue:\n${rawDialogue}\nOutput valid JSON without markdown wrapping.`
-          }
-        ],
-        temperature: 0.1,
-        response_format: { type: 'json_object' }
-      });
-      jsonText = completion.choices[0]?.message?.content?.trim();
+              },
+              {
+                role: 'user',
+                content: `Meeting dialogue:\n${rawDialogue}\nOutput valid JSON without markdown wrapping.`
+              }
+            ],
+            temperature: 0.1,
+            response_format: { type: 'json_object' }
+          });
+          jsonText = completion.choices[0]?.message?.content?.trim();
+          if (jsonText) break;
+        } catch (mErr) {
+          console.warn(`⚠️ Groq model ${model} failed:`, mErr.message);
+        }
+      }
     } catch (e) {
       console.warn('⚠️ Groq structuring failed:', e.message);
     }

@@ -65,12 +65,12 @@ async function downloadTextFilesToFolder(folderName, data) {
   }
 }
 
-// Helper: Dynamically send captions to available backend candidate
+// Helper: Dynamically send captions to available backend candidate (Local prioritized over cloud)
 async function postCaptionsToBackend(payload) {
   const storageData = await chrome.storage.local.get('backendUrl');
   const candidates = Array.from(new Set([
-    storageData.backendUrl,
-    ...CANDIDATE_BACKEND_URLS
+    ...CANDIDATE_BACKEND_URLS,
+    storageData.backendUrl
   ])).filter(Boolean);
 
   let lastError = null;

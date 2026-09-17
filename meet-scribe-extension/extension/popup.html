@@ -129,6 +129,12 @@
         <span>Start Meeting Recording</span>
       </button>
 
+      <!-- Upload Audio Button -->
+      <button id="upload-recording-btn" class="btn-secondary" style="margin-top: 8px;">
+        <span>📁</span>
+        <span>Reprocess Audio File</span>
+      </button>
+
       <div class="font-urdu idle-hint-urdu">
         آڈیو ریکارڈ اور نوٹس بنانے کے لیے بٹن دبائیں۔
       </div>
@@ -260,12 +266,19 @@
           An error occurred.
         </div>
       </div>
-      <button id="error-retry-btn" class="btn-danger btn-retry-margin">
-        Dismiss &amp; Try Again
-      </button>
+      <div style="display: flex; gap: 8px; width: 100%; margin-top: 12px;">
+        <button id="error-retry-btn" class="btn-danger" style="flex: 1;">
+          Try Again
+        </button>
+        <button id="error-upload-btn" class="btn-secondary" style="flex: 1;">
+          📁 Reprocess File
+        </button>
+      </div>
     </div>
 
   </main>
+
+  <input type="file" id="manual-audio-file-input" accept="audio/*,.webm,.mp3,.wav,.m4a,.ogg" style="display: none;">
 
   <!-- Bottom Footer -->
   <footer class="app-footer">

@@ -84,7 +84,7 @@ sequenceDiagram
 
 ### Phase 3: Express Backend & Direct Multimodal Audio AI Processing
 1. **Direct Audio Input**: The compiled audio recording is transmitted directly to the Express.js backend at `/api/process-meeting`.
-2. **Gemini Multimodal Audio**: Google Gemini (`gemini-3.6-flash`, or the configured `GEMINI_MODEL`) listens directly to the audio recording.
+2. **Gemini Multimodal Audio**: Google Gemini (`gemini-2.5-flash`, or the configured `GEMINI_MODEL`) listens directly to the audio recording.
 3. **Plain Content Generation (No Speaker Names)**:
    - All speaker names, labels, and tags (e.g., `[Speaker]:`, `[Name]:`, `[Person]:`) are strictly excluded.
    - Transcripts are formatted into clean, readable paragraphs with natural punctuation.

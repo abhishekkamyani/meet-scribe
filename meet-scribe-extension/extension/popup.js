@@ -67,7 +67,12 @@ const elements = {
 
   // Error View
   errorMessageText: document.getElementById('error-message-text'),
-  errorRetryBtn: document.getElementById('error-retry-btn')
+  errorRetryBtn: document.getElementById('error-retry-btn'),
+  errorUploadBtn: document.getElementById('error-upload-btn'),
+
+  // Manual Reprocessing
+  uploadRecordingBtn: document.getElementById('upload-recording-btn'),
+  manualAudioFileInput: document.getElementById('manual-audio-file-input')
 };
 
 let timerInterval = null;
@@ -95,12 +100,12 @@ async function ensureMicrophonePermission(interactive = false) {
   }
 }
 
-// Dynamically discover and test backend endpoints
+// Dynamically discover and test backend endpoints (Local prioritized over cloud)
 async function autoDiscoverBackend() {
   const saved = await chrome.storage.local.get('backendUrl');
   const candidates = Array.from(new Set([
-    saved.backendUrl,
-    ...CANDIDATE_BACKEND_URLS
+    ...CANDIDATE_BACKEND_URLS,
+    saved.backendUrl
   ])).filter(Boolean);
 
   for (const url of candidates) {
@@ -111,7 +116,7 @@ async function autoDiscoverBackend() {
         activeBackendUrl = cleanUrl;
         await chrome.storage.local.set({ backendUrl: cleanUrl });
         elements.statusDot.className = 'status-dot online';
-        elements.statusText.textContent = 'Server Online';
+        elements.statusText.textContent = cleanUrl.includes('localhost') ? 'Local Server Online' : 'Cloud Server Online';
         return cleanUrl;
       }
     } catch (e) {
@@ -541,11 +546,110 @@ function setupEventListeners() {
   });
 
   // Retry / Dismiss Error
-  elements.errorRetryBtn.addEventListener('click', async () => {
-    await chrome.storage.local.set({ recordingState: 'idle', lastError: null });
-    showView('idle');
-    await checkActiveTab();
-  });
+  if (elements.errorRetryBtn) {
+    elements.errorRetryBtn.addEventListener('click', async () => {
+      await chrome.storage.local.set({ recordingState: 'idle', lastError: null });
+      showView('idle');
+      await checkActiveTab();
+    });
+  }
+
+  // Manual Reprocessing Trigger (Idle & Error views) - Opens upload.html in dedicated tab
+  const openUploadTab = () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('upload.html') });
+  };
+
+  if (elements.uploadRecordingBtn) {
+    elements.uploadRecordingBtn.addEventListener('click', openUploadTab);
+  }
+  if (elements.errorUploadBtn) {
+    elements.errorUploadBtn.addEventListener('click', openUploadTab);
+  }
+}
+
+// Handle manual audio file upload & reprocessing
+async function handleManualAudioUpload(file) {
+  if (!file) return;
+
+  if (!userGeminiKey && !userGroqKey) {
+    showView('error');
+    elements.errorMessageText.textContent = 'Please enter your Gemini API key in Settings (⚙️) before reprocessing audio recordings.';
+    if (elements.settingsPanel) elements.settingsPanel.classList.remove('hidden');
+    if (elements.geminiApiKeyInput) elements.geminiApiKeyInput.focus();
+    return;
+  }
+
+  showView('processing');
+  if (elements.processingStepLabel) {
+    elements.processingStepLabel.textContent = `Uploading audio recording (${(file.size / (1024 * 1024)).toFixed(1)} MB) to AI backend...`;
+  }
+
+  try {
+    const formData = new FormData();
+    formData.append('audio', file, file.name || '0_meeting_audio.webm');
+    if (userGeminiKey) formData.append('geminiApiKey', userGeminiKey);
+    if (userGroqKey) formData.append('groqApiKey', userGroqKey);
+
+    const targetUrl = activeBackendUrl.replace(/\/+$/, '');
+    console.log(`[Popup] Sending uploaded audio file (${file.name}) to ${targetUrl}/api/process-meeting...`);
+
+    const response = await fetch(`${targetUrl}/api/process-meeting`, {
+      method: 'POST',
+      headers: {
+        ...(userGeminiKey ? { 'X-Gemini-API-Key': userGeminiKey } : {}),
+        ...(userGroqKey ? { 'X-Groq-API-Key': userGroqKey } : {})
+      },
+      body: formData
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      let parsedMsg = errText;
+      try {
+        const j = JSON.parse(errText);
+        parsedMsg = j.error || j.message || errText;
+      } catch (e) {}
+      throw new Error(`Backend Error (${response.status}): ${parsedMsg}`);
+    }
+
+    const resJson = await response.json();
+    if (!resJson.success || !resJson.data) {
+      throw new Error(resJson.error || 'Audio AI returned no data.');
+    }
+
+    // Auto-download 4 files into Downloads folder
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
+    const timeStr = String(now.getHours()).padStart(2, '0') + '-' + String(now.getMinutes()).padStart(2, '0');
+    const folderName = `MeetScribe_Urdu/Reprocessed_${dateStr}_${timeStr}`;
+
+    if (elements.processingStepLabel) {
+      elements.processingStepLabel.textContent = 'Saving 4 plain notes files to Downloads...';
+    }
+
+    await triggerDownload(folderName, '1_transcript_urdu.txt', resJson.data.transcript_urdu || '');
+    await new Promise(r => setTimeout(r, 200));
+    await triggerDownload(folderName, '2_transcript_english.txt', resJson.data.transcript_english || '');
+    await new Promise(r => setTimeout(r, 200));
+    await triggerDownload(folderName, '3_action_items_urdu.txt', resJson.data.action_items_urdu || '');
+    await new Promise(r => setTimeout(r, 200));
+    await triggerDownload(folderName, '4_action_items_english_improved.txt', resJson.data.action_items_english_improved || '');
+
+    await chrome.storage.local.set({
+      recordingState: 'complete',
+      lastResults: resJson.data,
+      completedAt: new Date().toISOString(),
+      lastError: null
+    });
+
+    showView('complete');
+    populateResults(resJson.data);
+  } catch (err) {
+    console.error('[Popup] Reprocessing error:', err);
+    await chrome.storage.local.set({ recordingState: 'error', lastError: err.message });
+    showView('error');
+    elements.errorMessageText.textContent = `Reprocessing Failed: ${err.message}`;
+  }
 }
 
 // Listen for storage changes

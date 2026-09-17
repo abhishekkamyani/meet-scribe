@@ -1,4 +1,6 @@
 require('dotenv').config(); // C8 fix: load .env before anything else so GEMINI_API_KEY / GROQ_API_KEY are available locally
+const dns = require('dns');
+try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
 const os = require('os');
 const express = require('express');
 const cors = require('cors');
@@ -14,21 +16,32 @@ const { GoogleAIFileManager, FileState } = require('@google/generative-ai/server
 const GEMINI_INLINE_LIMIT_BYTES = 15 * 1024 * 1024;
 const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
 const GROQ_TEXT_MODEL_CANDIDATES = [
-  'openai/gpt-oss-20b',
-  'openai/gpt-oss-120b',
-  'qwen/qwen3.6-27b'
+  'llama-3.3-70b-versatile',
+  'llama-3.1-8b-instant',
+  'llama3-70b-8192',
+  'llama3-8b-8192',
+  'mixtral-8x7b-32768'
 ];
 
 function geminiModelCandidates() {
   return [...new Set([
     process.env.GEMINI_MODEL,
-    DEFAULT_GEMINI_MODEL
+    DEFAULT_GEMINI_MODEL,
+    'gemini-3.6-flash',
+    'gemini-3.1-pro-preview',
+    'gemini-3.5-flash',
+    'gemini-3.0-flash',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro'
   ].filter(Boolean))];
 }
 
 function isTransientProviderError(error) {
   const message = String(error?.message || error).toLowerCase();
   const status = Number(error?.status || error?.statusCode || 0);
+  if (status === 404 || /not found|is not supported|invalid model|unsupported model/i.test(message)) {
+    return false;
+  }
   return status === 408 || status === 429 || status >= 500 ||
     /fetch failed|connection error|econnreset|etimedout|enotfound|socket hang up|network error/.test(message);
 }
@@ -101,9 +114,275 @@ app.get('/', (req, res) => {
     status: 'online',
     service: 'MeetScribe Urdu API (Express Backend)',
     health: '/api/health',
+    uploadPage: '/upload',
     processCaptions: '/api/process-captions',
     processMeeting: '/api/process-meeting'
   });
+});
+
+// Interactive Web Page for Manual Recording Audio Processing
+app.get('/upload', (req, res) => {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MeetScribe Urdu - Manual Audio Reprocessing</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --text: #f8fafc;
+      --subtext: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --accent: #10b981;
+      --border: #334155;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 2rem;
+      display: flex;
+      justify-content: center;
+    }
+    .container {
+      max-width: 800px;
+      width: 100%;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .header h1 {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+    }
+    .header p {
+      color: var(--subtext);
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .drop-zone {
+      border: 2px dashed var(--primary);
+      border-radius: 8px;
+      padding: 2.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .drop-zone:hover {
+      background: rgba(59, 130, 246, 0.05);
+    }
+    .drop-zone p {
+      margin: 0.5rem 0 0;
+      color: var(--subtext);
+    }
+    input[type="file"] {
+      display: none;
+    }
+    .btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      margin-top: 1rem;
+      font-size: 1rem;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    .form-group label {
+      display: block;
+      font-size: 0.875rem;
+      margin-bottom: 0.25rem;
+      color: var(--subtext);
+    }
+    .form-group input {
+      width: 100%;
+      padding: 0.5rem;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: white;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+    .status-box {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 6px;
+      display: none;
+    }
+    .status-loading { background: rgba(59, 130, 246, 0.1); color: var(--primary); border: 1px solid var(--primary); }
+    .status-success { background: rgba(16, 185, 129, 0.1); color: var(--accent); border: 1px solid var(--accent); }
+    .status-error { background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid #ef4444; }
+    .results-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .result-box {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+    }
+    .result-box h3 {
+      margin-top: 0;
+      font-size: 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: inherit;
+      font-size: 0.875rem;
+      max-height: 200px;
+      overflow-y: auto;
+      color: var(--subtext);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🎙️ MeetScribe Urdu Audio Reprocessor</h1>
+      <p>Upload any meeting recording (.webm, .mp3, .wav, .m4a) to generate transcripts &amp; action items</p>
+    </div>
+
+    <div class="card">
+      <div class="form-group">
+        <label>Google Gemini API Key (Optional override if not set in server .env):</label>
+        <input type="password" id="geminiKey" placeholder="AIzaSy...">
+      </div>
+      
+      <div class="drop-zone" id="dropZone" onclick="document.getElementById('audioInput').click()">
+        <div style="font-size: 2rem;">📂</div>
+        <strong id="fileLabel">Click to select audio recording file or drag &amp; drop here</strong>
+        <p>Supports 0_meeting_audio.webm or any WebM / MP3 / WAV file</p>
+      </div>
+      <input type="file" id="audioInput" accept="audio/*,.webm,.mp3,.wav,.m4a,.ogg">
+
+      <button id="processBtn" class="btn" disabled>Upload &amp; Process Audio</button>
+      
+      <div id="statusBox" class="status-box"></div>
+    </div>
+
+    <div id="resultsCard" class="card" style="display: none;">
+      <h2>🎉 Transcripts &amp; Action Items Generated</h2>
+      <div class="results-grid">
+        <div class="result-box">
+          <h3>Urdu Transcript <button onclick="downloadText('1_transcript_urdu.txt', document.getElementById('urTrans').textContent)">💾</button></h3>
+          <pre id="urTrans"></pre>
+        </div>
+        <div class="result-box">
+          <h3>English Transcript <button onclick="downloadText('2_transcript_english.txt', document.getElementById('enTrans').textContent)">💾</button></h3>
+          <pre id="enTrans"></pre>
+        </div>
+        <div class="result-box">
+          <h3>Urdu Action Items <button onclick="downloadText('3_action_items_urdu.txt', document.getElementById('urAct').textContent)">💾</button></h3>
+          <pre id="urAct"></pre>
+        </div>
+        <div class="result-box">
+          <h3>English Action Items <button onclick="downloadText('4_action_items_english_improved.txt', document.getElementById('enAct').textContent)">💾</button></h3>
+          <pre id="enAct"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const audioInput = document.getElementById('audioInput');
+    const dropZone = document.getElementById('dropZone');
+    const fileLabel = document.getElementById('fileLabel');
+    const processBtn = document.getElementById('processBtn');
+    const statusBox = document.getElementById('statusBox');
+    const resultsCard = document.getElementById('resultsCard');
+    let selectedFile = null;
+
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.background = 'rgba(59, 130, 246, 0.1)'; });
+    dropZone.addEventListener('dragleave', () => { dropZone.style.background = 'transparent'; });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.style.background = 'transparent';
+      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+
+    audioInput.addEventListener('change', (e) => {
+      if (e.target.files.length) handleFile(e.target.files[0]);
+    });
+
+    function handleFile(file) {
+      selectedFile = file;
+      fileLabel.textContent = 'Selected: ' + file.name + ' (' + (file.size / (1024 * 1024)).toFixed(2) + ' MB)';
+      processBtn.disabled = false;
+    }
+
+    processBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      processBtn.disabled = true;
+      statusBox.className = 'status-box status-loading';
+      statusBox.style.display = 'block';
+      statusBox.textContent = '⏳ Uploading audio & generating notes with Gemini AI... Please wait.';
+      resultsCard.style.display = 'none';
+
+      const formData = new FormData();
+      formData.append('audio', selectedFile);
+      const key = document.getElementById('geminiKey').value.trim();
+      if (key) formData.append('geminiApiKey', key);
+
+      try {
+        const res = await fetch('/api/process-meeting', {
+          method: 'POST',
+          headers: key ? { 'X-Gemini-API-Key': key } : {},
+          body: formData
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.error || 'Processing failed');
+
+        statusBox.className = 'status-box status-success';
+        statusBox.textContent = '✓ Meeting notes generated successfully!';
+        resultsCard.style.display = 'block';
+
+        document.getElementById('urTrans').textContent = json.data.transcript_urdu || '';
+        document.getElementById('enTrans').textContent = json.data.transcript_english || '';
+        document.getElementById('urAct').textContent = json.data.action_items_urdu || '';
+        document.getElementById('enAct').textContent = json.data.action_items_english_improved || '';
+      } catch (err) {
+        statusBox.className = 'status-box status-error';
+        statusBox.textContent = '✕ Error: ' + err.message;
+      } finally {
+        processBtn.disabled = false;
+      }
+    });
+
+    function downloadText(filename, text) {
+      const blob = new Blob(['\uFEFF' + text], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+    }
+  </script>
+</body>
+</html>`;
+  res.send(html);
 });
 
 // Health check endpoints
