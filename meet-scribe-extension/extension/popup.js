@@ -613,9 +613,35 @@ async function handleManualAudioUpload(file) {
     }
 
     const resJson = await response.json();
-    if (!resJson.success || !resJson.data) {
+    if (!resJson.success) {
       throw new Error(resJson.error || 'Audio AI returned no data.');
     }
+
+    let notesData = resJson.data;
+    if (resJson.jobId) {
+      if (elements.processingStepLabel) {
+        elements.processingStepLabel.textContent = 'Transcribing audio (this can take a few minutes for long recordings)...';
+      }
+      while (true) {
+        await new Promise(r => setTimeout(r, 4000));
+        const statusRes = await fetch(`${targetUrl}/api/job-status/${resJson.jobId}`, {
+          headers: {
+            ...(userGeminiKey ? { 'X-Gemini-API-Key': userGeminiKey } : {}),
+            ...(userGroqKey ? { 'X-Groq-API-Key': userGroqKey } : {})
+          }
+        });
+        const statusJson = await statusRes.json();
+        if (!statusRes.ok || !statusJson.success) {
+          throw new Error(statusJson.error || 'Lost track of the audio processing job.');
+        }
+        if (statusJson.status === 'done') { notesData = statusJson.data; break; }
+        if (statusJson.status === 'error') throw new Error(statusJson.error || 'Audio processing failed.');
+      }
+    }
+    if (!notesData) {
+      throw new Error('Audio AI returned no data.');
+    }
+    resJson.data = notesData;
 
     // Auto-download 4 files into Downloads folder
     const now = new Date();

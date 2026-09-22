@@ -1,4 +1,5 @@
 require('dotenv').config(); // C8 fix: load .env before anything else so GEMINI_API_KEY / GROQ_API_KEY are available locally
+const crypto = require('crypto');
 const dns = require('dns');
 try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {}
 const os = require('os');
@@ -12,8 +13,12 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { GoogleAIFileManager, FileState } = require('@google/generative-ai/server');
 
 // Gemini's inline-base64 request path has a hard ~20MB ceiling; anything larger
-// must go through the File API (upload once, reference by URI).
-const GEMINI_INLINE_LIMIT_BYTES = 15 * 1024 * 1024;
+// must go through the File API (upload once, reference by URI). Keep this close to
+// that real ceiling so we avoid the extra File API upload+poll round trip (and its
+// own failure mode) whenever we don't strictly need it.
+const GEMINI_INLINE_LIMIT_BYTES = 19 * 1024 * 1024;
+// In-memory store for background audio-transcription jobs: jobId -> { status, data?, error?, createdAt }
+const audioJobs = new Map();
 const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
 const GROQ_TEXT_MODEL_CANDIDATES = [
   'llama-3.3-70b-versatile',
@@ -60,6 +65,31 @@ async function retryTransientProviderRequest(label, request, attempts = 3) {
     }
   }
   throw lastError;
+}
+
+// Gemini's JSON mode occasionally appends trailing content (e.g. a repeated/partial
+// object) after a complete, valid JSON object on long audio responses. Rather than
+// letting JSON.parse choke on the trailing bytes, extract just the first balanced
+// top-level {...} object and parse that.
+function parseFirstJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) throw new Error('No JSON object found in model response.');
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escapeNext) { escapeNext = false; continue; }
+    if (ch === '\\') { escapeNext = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return JSON.parse(text.slice(start, i + 1));
+    }
+  }
+  throw new Error('Unterminated JSON object in model response.');
 }
 
 const app = express();
@@ -480,7 +510,8 @@ OUTPUT JSON (strict schema, no extra keys):
         model: modelName,
         generationConfig: {
           temperature: 0.0,
-          responseMimeType: 'application/json'
+          responseMimeType: 'application/json',
+          maxOutputTokens: 65536
         },
         systemInstruction: systemInstruction
       });
@@ -502,7 +533,7 @@ Do NOT add, remove, or alter the meaning.\n\n---\n${rawTranscript}\n---\n\nRetur
         .replace(/\s*```$/i, '')
         .trim();
 
-      const parsedData = JSON.parse(cleanedJsonStr);
+      const parsedData = parseFirstJsonObject(cleanedJsonStr);
       const requiredKeys = ['transcript_urdu', 'transcript_english', 'action_items_urdu', 'action_items_english_improved'];
       requiredKeys.forEach(k => {
         parsedData[k] = parsedData[k] || '';
@@ -675,7 +706,39 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
   const clientGeminiKey = req.headers['x-gemini-api-key'] || req.body?.geminiApiKey;
   const filePath = uploadedFile.path;
 
-  try {
+  // Long recordings can take minutes to transcribe — respond immediately with a job id
+  // so the client isn't stuck holding one long HTTP connection open, then process in
+  // the background and let the client poll /api/job-status/:jobId for the result.
+  const jobId = crypto.randomUUID();
+  audioJobs.set(jobId, { status: 'processing', createdAt: Date.now() });
+  res.status(202).json({ success: true, jobId, status: 'processing' });
+
+  runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGroqKey)
+    .then((structuredOutput) => {
+      audioJobs.set(jobId, { status: 'done', data: sanitizePlainMeetingNotes(structuredOutput), createdAt: Date.now() });
+    })
+    .catch((err) => {
+      console.error('[MeetScribe Audio Error]:', err, err.cause ? `\nCause: ${err.cause}` : '');
+      audioJobs.set(jobId, { status: 'error', error: err.message || 'Audio processing failed.', createdAt: Date.now() });
+    })
+    .finally(() => {
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); } catch (e) {}
+      }
+      // Keep the result around long enough for the client to poll it, then reclaim memory.
+      setTimeout(() => audioJobs.delete(jobId), 30 * 60 * 1000).unref();
+    });
+});
+
+app.get('/api/job-status/:jobId', (req, res) => {
+  const job = audioJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ success: false, error: 'Job not found or has expired.' });
+  }
+  return res.status(200).json({ success: true, ...job });
+});
+
+async function runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGroqKey) {
     let structuredOutput = null;
     let lastTranscriptionError = null;
 
@@ -693,7 +756,10 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
       if (useFileApi) {
         console.log(`[MeetScribe Audio] File is ${(audioFileSize / (1024 * 1024)).toFixed(1)}MB — uploading via Gemini File API...`);
         const fileManager = new GoogleAIFileManager(effectiveGeminiKey);
-        uploadedGeminiFile = await fileManager.uploadFile(filePath, { mimeType: 'audio/webm' });
+        uploadedGeminiFile = await retryTransientProviderRequest(
+          '[MeetScribe Audio] Gemini File API upload',
+          () => fileManager.uploadFile(filePath, { mimeType: 'audio/webm' })
+        );
         let fileInfo = uploadedGeminiFile.file;
         while (fileInfo.state === FileState.PROCESSING) {
           await new Promise(r => setTimeout(r, 2000));
@@ -758,7 +824,8 @@ OUTPUT JSON (strict schema, no extra keys):
             model: modelName,
             generationConfig: {
               temperature: 0.1,
-              responseMimeType: 'application/json'
+              responseMimeType: 'application/json',
+              maxOutputTokens: 65536
             },
             systemInstruction: audioSystemInstruction
           });
@@ -772,6 +839,10 @@ OUTPUT JSON (strict schema, no extra keys):
           );
 
           const response = await result.response;
+          const finishReason = response.candidates?.[0]?.finishReason;
+          if (finishReason === 'MAX_TOKENS') {
+            console.warn(`[MeetScribe Audio] Gemini Audio (${modelName}) hit maxOutputTokens — response was truncated.`);
+          }
           const responseText = (response.text() || '').trim();
           const cleanedJsonStr = responseText
             .replace(/^```json\s*/i, '')
@@ -779,7 +850,7 @@ OUTPUT JSON (strict schema, no extra keys):
             .replace(/\s*```$/i, '')
             .trim();
 
-          const parsedData = JSON.parse(cleanedJsonStr);
+          const parsedData = parseFirstJsonObject(cleanedJsonStr);
           if (parsedData && (parsedData.transcript_urdu || parsedData.transcript_english)) {
             structuredOutput = parsedData;
             console.log(`[MeetScribe Audio] Direct Gemini Audio (${modelName}) succeeded ✓`);
@@ -854,22 +925,8 @@ OUTPUT JSON (strict schema, no extra keys):
       }
     }
 
-    return res.status(200).json({
-      success: true,
-      data: sanitizePlainMeetingNotes(structuredOutput)
-    });
-  } catch (err) {
-    console.error('[MeetScribe Audio Error]:', err);
-    return res.status(500).json({
-      success: false,
-      error: err.message || 'Audio processing failed.'
-    });
-  } finally {
-    if (fs.existsSync(filePath)) {
-      try { fs.unlinkSync(filePath); } catch (e) {}
-    }
-  }
-});
+    return structuredOutput;
+}
 
 /**
  * Scaffolding for Future Authentication (Email / Password / Google OAuth)

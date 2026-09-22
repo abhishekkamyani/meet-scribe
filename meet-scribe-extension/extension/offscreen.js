@@ -306,6 +306,21 @@ function isLocalBackendUrl(url) {
   return /^https?:\/\/localhost(:\d+)?/i.test(url) || /^https?:\/\/127\.0\.0\.1(:\d+)?/i.test(url);
 }
 
+// Poll the backend's async transcription job until it finishes (avoids holding one
+// long-lived HTTP connection open for the several minutes a long recording can take).
+async function pollAudioJob(baseUrl, jobId, headers) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 4000));
+    const res = await fetch(`${baseUrl}/api/job-status/${jobId}`, { headers });
+    const json = await res.json();
+    if (!res.ok || !json.success) {
+      throw new Error(json.error || 'Lost track of the audio processing job.');
+    }
+    if (json.status === 'done') return json.data;
+    if (json.status === 'error') throw new Error(json.error || 'Audio processing failed.');
+  }
+}
+
 // Process audio recording with AI backend (primary pipeline)
 async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
   if (!lastCompiledAudioBlob || lastCompiledAudioBlob.size === 0) {
@@ -357,10 +372,21 @@ async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
       }
 
       const resJson = await response.json();
-      if (!resJson.success || !resJson.data) {
+      if (!resJson.success) {
         throw new Error(resJson.error || 'Invalid response from Audio AI backend.');
       }
 
+      if (resJson.jobId) {
+        const data = await pollAudioJob(cleanUrl, resJson.jobId, {
+          ...(geminiApiKey ? { 'X-Gemini-API-Key': geminiApiKey } : {}),
+          ...(groqApiKey ? { 'X-Groq-API-Key': groqApiKey } : {})
+        });
+        return { success: true, data };
+      }
+
+      if (!resJson.data) {
+        throw new Error('Invalid response from Audio AI backend.');
+      }
       return { success: true, data: resJson.data };
     } catch (err) {
       console.warn(`[Offscreen Audio] Backend ${cleanUrl} failed:`, err.message);
