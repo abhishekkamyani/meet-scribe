@@ -299,7 +299,7 @@ async function stopRecording() {
 // request bodies at 4.5MB regardless of any app-level config, so we must not even
 // attempt a cloud upload once the recording exceeds that ceiling.
 const LOCAL_BACKEND_URLS = ['http://localhost:3001', 'http://localhost:3000'];
-const CLOUD_BACKEND_URLS = ['https://meet-scribe-five.vercel.app'];
+const CLOUD_BACKEND_URLS = ['https://meet-scribe-ck55.onrender.com'];
 const CLOUD_PAYLOAD_LIMIT_BYTES = 4.4 * 1024 * 1024; // stay safely under Vercel's 4.5MB hard limit
 
 function isLocalBackendUrl(url) {

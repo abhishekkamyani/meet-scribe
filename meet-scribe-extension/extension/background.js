@@ -11,7 +11,7 @@ const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 const CANDIDATE_BACKEND_URLS = [
   'http://localhost:3001',
   'http://localhost:3000',
-  'https://meet-scribe-five.vercel.app'
+  'https://meet-scribe-ck55.onrender.com'
 ];
 
 // Helper: Ensure the offscreen document is open

@@ -6,7 +6,7 @@
 const CANDIDATE_BACKEND_URLS = [
   'http://localhost:3001',
   'http://localhost:3000',
-  'https://meet-scribe-five.vercel.app'
+  'https://meet-scribe-ck55.onrender.com'
 ];
 
 // DOM Elements
