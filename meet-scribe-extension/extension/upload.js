@@ -215,8 +215,26 @@ function setupEventListeners() {
           }
 
           const data = await response.json();
-          if (!data.success || !data.data) {
+          if (!data.success) {
             throw new Error(data.error || 'Audio processing returned no data.');
+          }
+
+          if (data.jobId) {
+            while (true) {
+              await new Promise(r => setTimeout(r, 4000));
+              const statusRes = await fetch(`${cleanUrl}/api/job-status/${data.jobId}`, {
+                headers: geminiKey ? { 'X-Gemini-API-Key': geminiKey } : {}
+              });
+              const statusJson = await statusRes.json();
+              if (!statusRes.ok || !statusJson.success) {
+                throw new Error(statusJson.error || 'Lost track of the audio processing job.');
+              }
+              if (statusJson.status === 'done') { data.data = statusJson.data; break; }
+              if (statusJson.status === 'error') throw new Error(statusJson.error || 'Audio processing failed.');
+            }
+          }
+          if (!data.data) {
+            throw new Error('Audio processing returned no data.');
           }
 
           resJson = data;
