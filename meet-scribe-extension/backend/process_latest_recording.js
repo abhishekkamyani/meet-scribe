@@ -61,7 +61,7 @@ async function processLatestRecording() {
     const genAI = new GoogleGenerativeAI(geminiKey);
     const fileBuffer = fs.readFileSync(audioPath);
     const base64Audio = fileBuffer.toString('base64');
-    const audioModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.0-flash', 'gemini-2.5-flash'].filter(Boolean))];
+    const audioModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.5-flash', 'gemini-3.6-flash'].filter(Boolean))];
 
 function stripSpeakerTags(str) {
   if (!str || typeof str !== 'string') return '';
@@ -158,7 +158,7 @@ Format the output as clean, continuous, natural plain text with clear paragraph 
 
   if (hasGemini) {
     const genAI = new GoogleGenerativeAI(geminiKey);
-    const structModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.6-flash', 'gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.0-flash', 'gemini-2.5-flash'].filter(Boolean))];
+    const structModels = [...new Set([process.env.GEMINI_MODEL, 'gemini-3.5-flash', 'gemini-3.6-flash'].filter(Boolean))];
 
     for (const modelName of structModels) {
       try {

@@ -432,12 +432,16 @@ function setupEventListeners() {
 
   // Start Recording
   elements.startRecordingBtn.addEventListener('click', async () => {
+    const normalizedGeminiKey = (userGeminiKey || '').trim();
+    const normalizedGroqKey = (userGroqKey || '').trim();
+    const hasPlaceholder = /your_(gemini|groq)_api_key_here|replace_me|changeme|demo_key|dummy_key/i;
+
     // Early validation: ensure both API keys are provided for BYOK
-    if (!userGeminiKey || !userGroqKey) {
+    if (!normalizedGeminiKey || !normalizedGroqKey || hasPlaceholder.test(normalizedGeminiKey) || hasPlaceholder.test(normalizedGroqKey)) {
       showView('error');
-      elements.errorMessageText.textContent = 'Please enter both your Gemini and Groq API keys in the Settings (⚙️) before starting a recording.';
+      elements.errorMessageText.textContent = 'Please enter both your real Gemini and Groq API keys in the Settings (⚙️) before starting a recording.';
       elements.settingsPanel.classList.remove('hidden');
-      if (!userGeminiKey) elements.geminiApiKeyInput.focus();
+      if (!normalizedGeminiKey || hasPlaceholder.test(normalizedGeminiKey)) elements.geminiApiKeyInput.focus();
       else elements.groqApiKeyInput.focus();
       return;
     }
