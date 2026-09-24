@@ -19,7 +19,7 @@ const { GoogleAIFileManager, FileState } = require('@google/generative-ai/server
 const GEMINI_INLINE_LIMIT_BYTES = 19 * 1024 * 1024;
 // In-memory store for background audio-transcription jobs: jobId -> { status, data?, error?, createdAt }
 const audioJobs = new Map();
-const DEFAULT_GEMINI_MODEL = 'gemini-3.6-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
 const GROQ_TEXT_MODEL_CANDIDATES = [
   'llama-3.3-70b-versatile',
   'llama-3.1-8b-instant',
@@ -28,22 +28,41 @@ const GROQ_TEXT_MODEL_CANDIDATES = [
   'mixtral-8x7b-32768'
 ];
 
+function normalizeApiKey(value) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim().replace(/^['"]|['"]$/g, '');
+  if (!trimmed) return '';
+  if (/your_(gemini|groq)_api_key_here|replace_me|changeme|demo_key|dummy_key|example_key/i.test(trimmed)) {
+    return '';
+  }
+  return trimmed;
+}
+
 function geminiModelCandidates() {
   return [...new Set([
     process.env.GEMINI_MODEL,
     DEFAULT_GEMINI_MODEL,
-    'gemini-3.6-flash',
-    'gemini-3.1-pro-preview',
     'gemini-3.5-flash',
-    'gemini-3.0-flash',
-    'gemini-2.5-flash',
-    'gemini-2.5-pro'
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite'
   ].filter(Boolean))];
+}
+
+function isQuotaExceededError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  const status = Number(error?.status || error?.statusCode || 0);
+  return status === 429 && /quota exceeded|free tier|rate limit|current quota|too many requests/i.test(message);
 }
 
 function isTransientProviderError(error) {
   const message = String(error?.message || error).toLowerCase();
   const status = Number(error?.status || error?.statusCode || 0);
+  if (isQuotaExceededError(error)) {
+    return false;
+  }
   if (status === 404 || /not found|is not supported|invalid model|unsupported model/i.test(message)) {
     return false;
   }
@@ -51,7 +70,7 @@ function isTransientProviderError(error) {
     /fetch failed|connection error|econnreset|etimedout|enotfound|socket hang up|network error/.test(message);
 }
 
-async function retryTransientProviderRequest(label, request, attempts = 3) {
+async function retryTransientProviderRequest(label, request, attempts = 1) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -59,7 +78,7 @@ async function retryTransientProviderRequest(label, request, attempts = 3) {
     } catch (error) {
       lastError = error;
       if (!isTransientProviderError(error) || attempt === attempts) break;
-      const delayMs = attempt * 1000;
+      const delayMs = Math.min(1000, attempt * 500);
       console.warn(`${label} failed due to a temporary connection error; retrying in ${delayMs / 1000}s (${attempt}/${attempts - 1})...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
@@ -72,13 +91,17 @@ async function retryTransientProviderRequest(label, request, attempts = 3) {
 // letting JSON.parse choke on the trailing bytes, extract just the first balanced
 // top-level {...} object and parse that.
 function parseFirstJsonObject(text) {
-  const start = text.indexOf('{');
+  const source = String(text || '').trim();
+  const start = source.indexOf('{');
   if (start === -1) throw new Error('No JSON object found in model response.');
+
   let depth = 0;
   let inString = false;
   let escapeNext = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
+  let completedObjectEnd = -1;
+
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
     if (escapeNext) { escapeNext = false; continue; }
     if (ch === '\\') { escapeNext = true; continue; }
     if (ch === '"') { inString = !inString; continue; }
@@ -86,9 +109,29 @@ function parseFirstJsonObject(text) {
     if (ch === '{') depth++;
     else if (ch === '}') {
       depth--;
-      if (depth === 0) return JSON.parse(text.slice(start, i + 1));
+      if (depth === 0) {
+        completedObjectEnd = i;
+        const candidate = source.slice(start, i + 1);
+        try {
+          return JSON.parse(candidate);
+        } catch (candidateErr) {
+          // The model may have returned a valid prefix followed by truncated text.
+          // Keep walking to the last complete closing brace that still parses.
+        }
+      }
     }
   }
+
+  for (let end = source.length - 1; end > start; end--) {
+    const candidate = source.slice(start, end + 1);
+    if (!candidate.includes('{') || !candidate.includes('}')) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch (error) {
+      // Try shorter prefixes until we find a parseable JSON object.
+    }
+  }
+
   throw new Error('Unterminated JSON object in model response.');
 }
 
@@ -447,11 +490,15 @@ function stripSpeakerTags(str) {
 
 function sanitizePlainMeetingNotes(data) {
   if (!data || typeof data !== 'object') return data;
+  const fallbackEnglish = 'No English transcript captured for this recording.';
+  const fallbackUrduAction = '• کوئی مخصوص ایکشن آئٹمز نہیں ملے۔';
+  const fallbackEnglishAction = '• No specific action items were identified.';
+
   return {
-    transcript_urdu: stripSpeakerTags(data.transcript_urdu),
-    transcript_english: stripSpeakerTags(data.transcript_english),
-    action_items_urdu: stripSpeakerTags(data.action_items_urdu),
-    action_items_english_improved: stripSpeakerTags(data.action_items_english_improved)
+    transcript_urdu: stripSpeakerTags(data.transcript_urdu || ''),
+    transcript_english: stripSpeakerTags(data.transcript_english || fallbackEnglish),
+    action_items_urdu: stripSpeakerTags(data.action_items_urdu || fallbackUrduAction),
+    action_items_english_improved: stripSpeakerTags(data.action_items_english_improved || fallbackEnglishAction)
   };
 }
 
@@ -460,8 +507,8 @@ function sanitizePlainMeetingNotes(data) {
  * Generates plain bilingual transcripts and action items without any speaker names.
  */
 async function processCaptionsWithGemini(rawTranscript, participants = [], clientGeminiKey) {
-  const activeGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
-  if (!activeGeminiKey || activeGeminiKey === 'your_gemini_api_key_here') {
+  const activeGeminiKey = normalizeApiKey(clientGeminiKey || process.env.GEMINI_API_KEY);
+  if (!activeGeminiKey) {
     throw new Error('Google Gemini API Key is missing. Please enter your Gemini API Key in settings.');
   }
 
@@ -511,7 +558,7 @@ OUTPUT JSON (strict schema, no extra keys):
         generationConfig: {
           temperature: 0.0,
           responseMimeType: 'application/json',
-          maxOutputTokens: 65536
+          maxOutputTokens: 20000
         },
         systemInstruction: systemInstruction
       });
@@ -554,8 +601,8 @@ Do NOT add, remove, or alter the meaning.\n\n---\n${rawTranscript}\n---\n\nRetur
  * Fallback: Process Meeting Text with Groq LLM
  */
 async function processCaptionsWithGroq(rawTranscript, participants = [], clientGroqKey) {
-  const activeGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
-  if (!activeGroqKey || activeGroqKey === 'your_groq_api_key_here') {
+  const activeGroqKey = normalizeApiKey(clientGroqKey || process.env.GROQ_API_KEY);
+  if (!activeGroqKey) {
     throw new Error('Groq API Key is missing.');
   }
 
@@ -607,8 +654,8 @@ Strictly DO NOT include any speaker names or speaker tags. Keep transcript_urdu 
  */
 app.post(['/api/process-captions', '/process-captions'], async (req, res) => {
   const { transcript, utterances, participants = [], geminiApiKey, groqApiKey } = req.body || {};
-  const clientGeminiKey = req.headers['x-gemini-api-key'] || geminiApiKey;
-  const clientGroqKey = req.headers['x-groq-api-key'] || groqApiKey;
+  const clientGeminiKey = normalizeApiKey(req.headers['x-gemini-api-key'] || geminiApiKey);
+  const clientGroqKey = normalizeApiKey(req.headers['x-groq-api-key'] || groqApiKey);
 
   // Build raw transcript text if array of utterances was provided
   let formattedTranscript = '';
@@ -742,8 +789,14 @@ async function runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGr
     let structuredOutput = null;
     let lastTranscriptionError = null;
 
+    const effectiveGeminiKey = normalizeApiKey(clientGeminiKey || process.env.GEMINI_API_KEY);
+    const effectiveGroqKey = normalizeApiKey(clientGroqKey || process.env.GROQ_API_KEY);
+
+    if (!effectiveGeminiKey && !effectiveGroqKey) {
+      throw new Error('No API keys configured. Please save your Gemini or Groq key in the extension settings before recording.');
+    }
+
     // Strategy 1: Google Gemini Direct Multimodal Audio AI (Highest fidelity for Urdu/English)
-    const effectiveGeminiKey = clientGeminiKey || process.env.GEMINI_API_KEY;
     if (effectiveGeminiKey && effectiveGeminiKey !== 'your_gemini_api_key_here') {
       const genAI = new GoogleGenerativeAI(effectiveGeminiKey);
       const audioFileSize = fs.statSync(filePath).size;
@@ -825,7 +878,7 @@ OUTPUT JSON (strict schema, no extra keys):
             generationConfig: {
               temperature: 0.1,
               responseMimeType: 'application/json',
-              maxOutputTokens: 65536
+              maxOutputTokens: 20000
             },
             systemInstruction: audioSystemInstruction
           });
@@ -851,6 +904,16 @@ OUTPUT JSON (strict schema, no extra keys):
             .trim();
 
           const parsedData = parseFirstJsonObject(cleanedJsonStr);
+          const requiredKeys = ['transcript_urdu', 'transcript_english', 'action_items_urdu', 'action_items_english_improved'];
+          requiredKeys.forEach((key) => {
+            if (!parsedData[key]) {
+              parsedData[key] = key === 'transcript_english' ? 'No English transcript captured for this recording.'
+                : key === 'action_items_urdu' ? '• کوئی مخصوص ایکشن آئٹمز نہیں ملے۔'
+                : key === 'action_items_english_improved' ? '• No specific action items were identified.'
+                : '';
+            }
+          });
+
           if (parsedData && (parsedData.transcript_urdu || parsedData.transcript_english)) {
             structuredOutput = parsedData;
             console.log(`[MeetScribe Audio] Direct Gemini Audio (${modelName}) succeeded ✓`);
@@ -875,7 +938,6 @@ OUTPUT JSON (strict schema, no extra keys):
     // Strategy 2: Groq Whisper Large v3 Fallback (if Gemini Audio failed or was unavailable)
     if (!structuredOutput) {
       let rawText = '';
-      const effectiveGroqKey = clientGroqKey || process.env.GROQ_API_KEY;
       if (effectiveGroqKey && effectiveGroqKey !== 'your_groq_api_key_here') {
         try {
           console.log('[MeetScribe Audio] Falling back to Groq Whisper Large v3...');

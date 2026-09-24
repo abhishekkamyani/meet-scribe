@@ -18,6 +18,7 @@ const elements = {
   fileDetails: document.getElementById('file-details'),
   audioFileInput: document.getElementById('audio-file-input'),
   geminiKeyInput: document.getElementById('gemini-key-input'),
+  groqKeyInput: document.getElementById('groq-key-input'),
   processAudioBtn: document.getElementById('process-audio-btn'),
   statusBox: document.getElementById('status-box'),
   statusIcon: document.getElementById('status-icon'),
@@ -111,6 +112,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (savedData.geminiApiKey) {
     elements.geminiKeyInput.value = savedData.geminiApiKey;
   }
+  if (savedData.groqApiKey) {
+    elements.groqKeyInput.value = savedData.groqApiKey;
+  }
 
   // Discover backend
   await autoDiscoverBackend();
@@ -167,6 +171,13 @@ function setupEventListeners() {
     }
   });
 
+  elements.groqKeyInput.addEventListener('input', () => {
+    const val = elements.groqKeyInput.value.trim();
+    if (val) {
+      chrome.storage.local.set({ groqApiKey: val });
+    }
+  });
+
   // Process button click
   elements.processAudioBtn.addEventListener('click', async () => {
     if (!selectedFile) return;
@@ -181,6 +192,7 @@ function setupEventListeners() {
 
     try {
       const geminiKey = elements.geminiKeyInput.value.trim();
+      const groqKey = elements.groqKeyInput.value.trim();
       const candidates = Array.from(new Set([
         'http://localhost:3001',
         'http://localhost:3000',
@@ -197,10 +209,14 @@ function setupEventListeners() {
           const formData = new FormData();
           formData.append('audio', selectedFile, selectedFile.name);
           if (geminiKey) formData.append('geminiApiKey', geminiKey);
+          if (groqKey) formData.append('groqApiKey', groqKey);
 
           const response = await fetch(`${cleanUrl}/api/process-meeting`, {
             method: 'POST',
-            headers: geminiKey ? { 'X-Gemini-API-Key': geminiKey } : {},
+            headers: {
+              ...(geminiKey ? { 'X-Gemini-API-Key': geminiKey } : {}),
+              ...(groqKey ? { 'X-Groq-API-Key': groqKey } : {})
+            },
             body: formData
           });
 
@@ -223,7 +239,10 @@ function setupEventListeners() {
             while (true) {
               await new Promise(r => setTimeout(r, 4000));
               const statusRes = await fetch(`${cleanUrl}/api/job-status/${data.jobId}`, {
-                headers: geminiKey ? { 'X-Gemini-API-Key': geminiKey } : {}
+                headers: {
+                  ...(geminiKey ? { 'X-Gemini-API-Key': geminiKey } : {}),
+                  ...(groqKey ? { 'X-Groq-API-Key': groqKey } : {})
+                }
               });
               const statusJson = await statusRes.json();
               if (!statusRes.ok || !statusJson.success) {
