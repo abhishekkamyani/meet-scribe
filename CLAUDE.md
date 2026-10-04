@@ -56,7 +56,6 @@ Both API keys (Gemini + Groq) must be configured before starting a recording —
 meet-scribe-extension/
 ├── backend/          # Express.js Node server
 │   ├── server.js     # All API routes + Gemini/Groq AI logic
-│   └── vercel.json   # Serverless deployment config
 └── extension/        # Chrome MV3 extension
     ├── manifest.json
     ├── background.js  # Service worker — pipeline coordinator
@@ -72,7 +71,7 @@ meet-scribe-extension/
 2. **background.js** (service worker) acquires `streamId` via `chrome.tabCapture`, opens the offscreen document, and relays `START_OFFSCREEN_RECORDING`
 3. **offscreen.js** captures tab audio + microphone simultaneously, mixes them with DSP (high-pass filter + compressor), and encodes as Opus WebM via `MediaRecorder`
 4. On stop: offscreen downloads `0_meeting_audio.webm` immediately to disk, then sends audio to backend
-5. **background.js** dynamically discovers the backend URL from `CANDIDATE_BACKEND_URLS` (`localhost:3001` → `localhost:3000` → Vercel fallback)
+5. **background.js** dynamically discovers the backend URL from `CANDIDATE_BACKEND_URLS` (`localhost:3001` → `localhost:3000` → Render fallback)
 6. **server.js** processes audio: Gemini multimodal audio (primary) → Groq Whisper STT + Gemini text formatting (fallback)
 7. Background downloads 4 organized UTF-8 text files into `Downloads/MeetScribe_Urdu/Meeting_[timestamp]/`
 

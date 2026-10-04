@@ -46,6 +46,10 @@ let activeBackendUrl = 'http://localhost:3001';
 let currentResults = null;
 let activeTabType = 'ur-trans';
 
+function isLocalBackendUrl(url) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(url);
+}
+
 // Auto-discover backend URL (Local servers prioritized over cloud)
 async function autoDiscoverBackend() {
   const saved = await chrome.storage.local.get('backendUrl');
@@ -56,13 +60,20 @@ async function autoDiscoverBackend() {
 
   for (const url of candidates) {
     const cleanUrl = url.replace(/\/+$/, '');
+    // Render's free tier sleeps when idle and needs up to a minute to cold-start, so a
+    // cloud URL gets a long timeout (this request is also what wakes it up).
+    const isLocal = isLocalBackendUrl(cleanUrl);
+    if (!isLocal) {
+      elements.statusDot.className = 'status-dot warning';
+      elements.statusText.textContent = 'Waking Cloud Server...';
+    }
     try {
-      const res = await fetch(`${cleanUrl}/api/health`, { signal: AbortSignal.timeout(2500) });
+      const res = await fetch(`${cleanUrl}/api/health`, { signal: AbortSignal.timeout(isLocal ? 2500 : 90000) });
       if (res.ok) {
         activeBackendUrl = cleanUrl;
         await chrome.storage.local.set({ backendUrl: cleanUrl });
         elements.statusDot.className = 'status-dot online';
-        elements.statusText.textContent = cleanUrl.includes('localhost') ? 'Local Server Online' : 'Cloud Server Online';
+        elements.statusText.textContent = isLocal ? 'Local Server Online' : 'Cloud Server Online';
         return cleanUrl;
       }
     } catch (e) {}
@@ -116,11 +127,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.groqKeyInput.value = savedData.groqApiKey;
   }
 
-  // Discover backend
-  await autoDiscoverBackend();
-
-  // Setup Event Listeners
+  // Setup Event Listeners first — discovery may wait up to ~90s on a cold cloud server
   setupEventListeners();
+
+  // Discover backend (also wakes the Render server as soon as the upload page opens)
+  autoDiscoverBackend();
 });
 
 function handleFileSelection(file) {
@@ -205,6 +216,14 @@ function setupEventListeners() {
 
       for (const cleanUrl of candidates) {
         try {
+          // Make sure a sleeping Render instance is fully up before streaming the upload to it
+          if (!isLocalBackendUrl(cleanUrl)) {
+            elements.statusDesc.textContent = 'Waking up cloud server (can take up to a minute)...';
+            try {
+              await fetch(`${cleanUrl}/api/health`, { cache: 'no-store', signal: AbortSignal.timeout(90000) });
+            } catch (e) {}
+            elements.statusDesc.textContent = `Sending ${selectedFile.name} (${(selectedFile.size / (1024 * 1024)).toFixed(1)} MB) to AI backend...`;
+          }
           console.log(`[UploadTab] Uploading ${selectedFile.name} to ${cleanUrl}/api/process-meeting...`);
           const formData = new FormData();
           formData.append('audio', selectedFile, selectedFile.name);

@@ -5,7 +5,7 @@
  * 2. Web Audio DSP processing: High-Pass Rumble Filter (85Hz) + Broadcast Dynamics Compressor.
  * 3. Dual-channel mixing (Tab Audio + Cleaned Mic) with speaker passthrough (prevents tab muting).
  * 4. Compiles and IMMEDIATELY downloads crystal-clear 0_meeting_audio.webm (128kbps Opus) before AI calls.
- * 5. Zero audio bytes are uploaded over the network.
+ * 5. Keeps the Render cloud backend awake while recording (health ping every 13 minutes).
  */
 
 let mediaRecorder = null;
@@ -18,6 +18,53 @@ let activeMicTrack = null;
 let isMeetMicMuted = false;
 let rawStreams = [];
 let currentMeetingFolder = '';
+let keepAliveTimer = null;
+
+const LOCAL_BACKEND_URLS = ['http://localhost:3001', 'http://localhost:3000'];
+const CLOUD_BACKEND_URLS = ['https://meet-scribe-ck55.onrender.com'];
+// Render's free tier spins the service down after 15 minutes without inbound traffic,
+// and a cold start can take up to a minute — ping just inside that window.
+const KEEP_ALIVE_INTERVAL_MS = 13 * 60 * 1000;
+const CLOUD_WAKE_TIMEOUT_MS = 90 * 1000;
+
+function isLocalBackendUrl(url) {
+  return /^https?:\/\/localhost(:\d+)?/i.test(url) || /^https?:\/\/127\.0\.0\.1(:\d+)?/i.test(url);
+}
+
+// Hit the backend health endpoint; on a sleeping Render instance this request is what
+// triggers the spin-up, so the timeout must outlast a cold start.
+async function pingBackend(url) {
+  const cleanUrl = url.replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${cleanUrl}/api/health`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(CLOUD_WAKE_TIMEOUT_MS)
+    });
+    console.log(`[Offscreen KeepAlive] ${cleanUrl} responded ${res.status}`);
+    return res.ok;
+  } catch (e) {
+    console.warn(`[Offscreen KeepAlive] ${cleanUrl} ping failed:`, e.message);
+    return false;
+  }
+}
+
+function startKeepAlive(backendUrl) {
+  stopKeepAlive();
+  const targets = Array.from(new Set([backendUrl, ...CLOUD_BACKEND_URLS]
+    .filter(Boolean)
+    .map(u => u.replace(/\/+$/, ''))
+    .filter(u => !isLocalBackendUrl(u))));
+  const pingAll = () => targets.forEach(u => pingBackend(u));
+  pingAll(); // wake it now so it is warm well before the recording ends
+  keepAliveTimer = setInterval(pingAll, KEEP_ALIVE_INTERVAL_MS);
+}
+
+function stopKeepAlive() {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+  }
+}
 
 // Helper: Synchronize microphone mute state with Google Meet
 function setMicMuteState(isMuted) {
@@ -105,7 +152,7 @@ async function downloadStructuredNotesFiles(folderName, data) {
 }
 
 // Start dual-channel audio recording with Echo Cancellation & Noise Suppression DSP
-async function startRecording(streamId, initialMuteState = false) {
+async function startRecording(streamId, initialMuteState = false, backendUrl = '') {
   isMeetMicMuted = Boolean(initialMuteState);
   recordedChunks = [];
   rawStreams = [];
@@ -210,14 +257,14 @@ async function startRecording(streamId, initialMuteState = false) {
   destinationNode.channelCount = 1;
   mediaStream = destinationNode.stream;
 
-  // 4. Initialize MediaRecorder (32kbps Opus WebM voice-optimized for Vercel/cloud payloads)
+  // 4. Initialize MediaRecorder (32kbps Opus WebM, voice-optimized to keep uploads fast)
   const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
     ? 'audio/webm;codecs=opus'
     : 'audio/webm';
 
   mediaRecorder = new MediaRecorder(mediaStream, {
     mimeType: mimeType,
-    audioBitsPerSecond: 32000 // 32kbps voice-optimized (reduces 5-min audio to ~1.1MB, safely below Vercel's 4.5MB limit)
+    audioBitsPerSecond: 32000 // 32kbps voice-optimized (~14MB per hour of meeting)
   });
 
   mediaRecorder.ondataavailable = (event) => {
@@ -227,11 +274,13 @@ async function startRecording(streamId, initialMuteState = false) {
   };
 
   mediaRecorder.start(1000);
+  startKeepAlive(backendUrl);
   console.log(`[Offscreen] Crystal-clear voice recorder started (Opus 32kbps mono, AEC + Noise Suppression active).`);
 }
 
 // Stop recording and immediately download local 0_meeting_audio.webm before AI calls
 async function stopRecording() {
+  stopKeepAlive();
   return new Promise((resolve, reject) => {
     if (!mediaRecorder || mediaRecorder.state === 'inactive') {
       resolve({ success: true, folderName: currentMeetingFolder });
@@ -295,24 +344,23 @@ async function stopRecording() {
   });
 }
 
-// Local backends have no payload limit; cloud (Vercel) Serverless Functions hard-cap
-// request bodies at 4.5MB regardless of any app-level config, so we must not even
-// attempt a cloud upload once the recording exceeds that ceiling.
-const LOCAL_BACKEND_URLS = ['http://localhost:3001', 'http://localhost:3000'];
-const CLOUD_BACKEND_URLS = ['https://meet-scribe-ck55.onrender.com'];
-const CLOUD_PAYLOAD_LIMIT_BYTES = 4.4 * 1024 * 1024; // stay safely under Vercel's 4.5MB hard limit
-
-function isLocalBackendUrl(url) {
-  return /^https?:\/\/localhost(:\d+)?/i.test(url) || /^https?:\/\/127\.0\.0\.1(:\d+)?/i.test(url);
-}
-
 // Poll the backend's async transcription job until it finishes (avoids holding one
 // long-lived HTTP connection open for the several minutes a long recording can take).
 async function pollAudioJob(baseUrl, jobId, headers) {
+  // A single dropped poll (proxy hiccup, brief network loss) must not abandon a job
+  // that is still running on the server, so only give up after several in a row.
+  let transientFailures = 0;
   while (true) {
     await new Promise(r => setTimeout(r, 4000));
-    const res = await fetch(`${baseUrl}/api/job-status/${jobId}`, { headers });
-    const json = await res.json();
+    let res, json;
+    try {
+      res = await fetch(`${baseUrl}/api/job-status/${jobId}`, { headers, cache: 'no-store' });
+      json = await res.json();
+      transientFailures = 0;
+    } catch (e) {
+      if (++transientFailures >= 5) throw e;
+      continue;
+    }
     if (!res.ok || !json.success) {
       throw new Error(json.error || 'Lost track of the audio processing job.');
     }
@@ -335,13 +383,21 @@ async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
   ].filter(Boolean).map(u => u.replace(/\/+$/, ''))));
 
   let lastError = null;
-  let skippedCloudForSize = false;
 
   for (const cleanUrl of candidates) {
-    if (!isLocalBackendUrl(cleanUrl) && lastCompiledAudioBlob.size > CLOUD_PAYLOAD_LIMIT_BYTES) {
-      console.warn(`[Offscreen Audio] Skipping cloud backend ${cleanUrl} — recording is ${audioSizeMB}MB, above the ~4.4MB cloud upload limit.`);
-      skippedCloudForSize = true;
-      continue;
+    // Make sure a sleeping Render instance is fully up before streaming the upload to it
+    if (!isLocalBackendUrl(cleanUrl)) {
+      chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_STATUS_UPDATE',
+        state: 'processing',
+        step: 'Waking up cloud server (can take up to a minute)...'
+      }).catch(() => {});
+      await pingBackend(cleanUrl);
+      chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_STATUS_UPDATE',
+        state: 'processing',
+        step: 'Sending audio recording to AI for plain notes & action items...'
+      }).catch(() => {});
     }
 
     const formData = new FormData();
@@ -394,17 +450,13 @@ async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
     }
   }
 
-  if (skippedCloudForSize && (!lastError || /fetch|network|failed to fetch/i.test(lastError.message))) {
-    throw new Error(`Recording is ${audioSizeMB}MB, too large for the free cloud backend (4.5MB limit) and no local backend was reachable. Please run the backend locally ("npm start" in meet-scribe-extension/backend) and try again.`);
-  }
-
   throw lastError || new Error('Could not reach any backend server to process the audio.');
 }
 
 // Listen for messages from background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_OFFSCREEN_RECORDING') {
-    startRecording(message.streamId, message.initialMuteState)
+    startRecording(message.streamId, message.initialMuteState, message.backendUrl)
       .then(() => sendResponse({ success: true, folderName: currentMeetingFolder }))
       .catch((err) => {
         console.error('[Offscreen] Start recording failed:', err);

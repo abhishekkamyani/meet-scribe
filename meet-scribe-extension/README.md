@@ -13,7 +13,6 @@ meet-scribe-extension/
 │   ├── server.js           # Express.js backend (Captions structuring & Auth scaffolding)
 │   ├── package.json        # Dependencies (Express, @google/generative-ai, Groq, CORS)
 │   ├── .env.example        # Environment variables template
-│   └── vercel.json         # Vercel serverless deployment configuration
 └── extension/
     ├── manifest.json       # Chrome Manifest V3 configuration
     ├── popup.html          # Modern dark-mode UI with Urdu Nastaliq typography

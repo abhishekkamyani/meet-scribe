@@ -6,7 +6,7 @@ MeetScribe Urdu combines a **Google Meet Chrome Extension (Manifest V3)** with a
 
 ## 1. Backend Server Deployment
 
-You can host the Express backend on any platform such as **Render**, **Railway**, **Koyeb**, **Vercel**, or run it locally.
+You can host the Express backend on any platform such as **Render**, **Railway**, **Koyeb**, or run it locally.
 
 ### Option A: Local / Self-Hosted (Free & Fast)
 
@@ -28,13 +28,6 @@ The server will run on `http://localhost:3001`.
    - `GROQ_API_KEY`: (Optional) Your Groq API Key
    - `PORT`: `3001` (or default assigned by host)
 6. Copy your public service URL (e.g. `https://meet-scribe-backend.onrender.com`) and paste it into the extension's **Settings (⚙️)** under **Backend Server URL**.
-
-### Option C: Deploy to Vercel (Serverless)
-
-```bash
-cd "meet-scribe-extension"
-vercel
-```
 
 ---
 

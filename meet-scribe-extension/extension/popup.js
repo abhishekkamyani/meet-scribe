@@ -110,13 +110,20 @@ async function autoDiscoverBackend() {
 
   for (const url of candidates) {
     const cleanUrl = url.replace(/\/+$/, '');
+    // Render's free tier sleeps when idle and needs up to a minute to cold-start, so a
+    // cloud URL gets a long timeout (this request is also what wakes it up).
+    const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(cleanUrl);
+    if (!isLocal) {
+      elements.statusDot.className = 'status-dot warning';
+      elements.statusText.textContent = 'Waking Cloud Server...';
+    }
     try {
-      const res = await fetch(`${cleanUrl}/api/health`, { signal: AbortSignal.timeout(2500) });
+      const res = await fetch(`${cleanUrl}/api/health`, { signal: AbortSignal.timeout(isLocal ? 2500 : 90000) });
       if (res.ok) {
         activeBackendUrl = cleanUrl;
         await chrome.storage.local.set({ backendUrl: cleanUrl });
         elements.statusDot.className = 'status-dot online';
-        elements.statusText.textContent = cleanUrl.includes('localhost') ? 'Local Server Online' : 'Cloud Server Online';
+        elements.statusText.textContent = isLocal ? 'Local Server Online' : 'Cloud Server Online';
         return cleanUrl;
       }
     } catch (e) {
