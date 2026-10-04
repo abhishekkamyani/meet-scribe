@@ -13,7 +13,6 @@ meet-scribe-extension/
 │   ├── server.js           # Express.js backend (Captions structuring & Auth scaffolding)
 │   ├── package.json        # Dependencies (Express, @google/generative-ai, Groq, CORS)
 │   ├── .env.example        # Environment variables template
-│   └── vercel.json         # Vercel serverless deployment configuration
 └── extension/
     ├── manifest.json       # Chrome Manifest V3 configuration
     ├── popup.html          # Modern dark-mode UI with Urdu Nastaliq typography
@@ -105,3 +104,13 @@ If you need to reprocess a saved audio recording (`0_meeting_audio.webm` or any 
 - **Local Audio Preservation**: The full `.webm` Opus audio is saved directly to your computer's `Downloads` folder.
 - **Express Backend with Auth Scaffolding**: Provides clean separation of concerns, secure API key handling, and ready-to-use auth scaffolding (`/api/auth`) for future Google/Email user sign-in.
 - **Anti-Arabic Urdu Guardrails**: Strict prompt engineering ensures natural Pakistani/Indian corporate vocabulary (`ہیلو`, `السلام علیکم`, `اپ ڈیٹ`, `بٹن`, `پیج`, `ٹیسٹ`).
+
+## Known Limitation: Captions Stay Visible While Recording
+
+Speaker names in the transcripts come from Google Meet's live captions, which are the only place Meet exposes who is speaking. While a recording is running:
+
+- The extension turns Meet captions on, and the caption area is visible at the bottom of the meeting.
+- The CC button is locked, and captions are switched back on within a second if turned off with the `c` keyboard shortcut.
+- Captions are switched off again when the recording stops (if the extension turned them on).
+
+The caption area cannot be hidden: Meet reserves its space in its own layout logic, so hiding the panel only leaves an empty strip under the video. The caption text shown by Meet is not used for the transcript — the transcript text comes from the recorded audio.

@@ -37,6 +37,16 @@
       <span id="settings-saved-indicator" class="save-status-msg hidden">Saved! ✓</span>
     </div>
 
+    <!-- Your name: used to label your own turns in the transcripts -->
+    <div class="settings-field">
+      <div class="settings-label-row">
+        <span>Your Full Name (Required)</span>
+      </div>
+      <div class="input-group">
+        <input type="text" id="user-name-input" class="input-text" placeholder="As shown to others in Google Meet" autocomplete="name">
+      </div>
+    </div>
+
     <!-- Gemini API Key (Primary) -->
     <div class="settings-field">
       <div class="settings-label-row">
@@ -61,7 +71,7 @@
       </div>
     </div>
 
-    <button id="save-settings-btn" class="btn-small">Save API Keys</button>
+    <button id="save-settings-btn" class="btn-small">Save Settings</button>
   </div>
 
   <!-- Alert Banner: Missing API Keys -->
@@ -123,6 +133,8 @@
         </div>
       </div>
 
+      <div class="timer-subtext" style="margin-bottom: 8px;">ℹ️ Google Meet captions will be turned on and stay visible while recording. They are needed to detect speaker names and cannot be turned off until you stop.</div>
+
       <!-- Start Button -->
       <button id="start-recording-btn" class="btn-primary">
         <span>🎙️</span>
@@ -163,6 +175,7 @@
       <div>
         <div id="recording-timer" class="timer-display">00:00</div>
         <div class="timer-subtext">Tab audio + microphone recording in high fidelity</div>
+        <div class="timer-subtext" style="margin-top: 8px;">ℹ️ Meet captions stay on while recording (needed for speaker names). They switch off when you stop.</div>
       </div>
 
       <!-- Stop Button -->

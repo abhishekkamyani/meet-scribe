@@ -488,15 +488,56 @@ function stripSpeakerTags(str) {
     .trim();
 }
 
-function sanitizePlainMeetingNotes(data) {
+// Turn the extension's raw speaker timeline into a compact, trusted list of
+// "start-end name" lines for the audio prompt (names are user-controlled display names).
+const MAX_TIMELINE_TURNS = 3000;
+
+function formatTimelineClock(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mmss = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return h > 0 ? `${h}:${mmss}` : mmss;
+}
+
+function parseSpeakerTimeline(raw) {
+  let entries = raw;
+  if (typeof raw === 'string') {
+    try { entries = JSON.parse(raw); } catch (e) { return null; }
+  }
+  if (!Array.isArray(entries)) return null;
+
+  const turns = [];
+  for (const entry of entries.slice(0, MAX_TIMELINE_TURNS)) {
+    if (!entry || typeof entry.speaker !== 'string') continue;
+    const speaker = entry.speaker.replace(/[\r\n\[\]:"`]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const start = Number(entry.start);
+    const end = Number(entry.end);
+    if (!speaker || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+    turns.push({ speaker, start, end: Math.max(start, end) });
+  }
+  if (turns.length === 0) return null;
+
+  return {
+    names: Array.from(new Set(turns.map(t => t.speaker))),
+    text: turns.map(t => `${formatTimelineClock(t.start)}-${formatTimelineClock(t.end)}  ${t.speaker}`).join('\n')
+  };
+}
+
+// keepSpeakerLabels: transcripts keep their "Name: ..." turn prefixes; action items never carry names.
+function sanitizePlainMeetingNotes(data, { keepSpeakerLabels = false } = {}) {
   if (!data || typeof data !== 'object') return data;
+  const cleanTranscript = keepSpeakerLabels
+    ? (str) => (typeof str === 'string' ? str.replace(/^\uFEFF/, '').trim() : '')
+    : stripSpeakerTags;
   const fallbackEnglish = 'No English transcript captured for this recording.';
   const fallbackUrduAction = '• کوئی مخصوص ایکشن آئٹمز نہیں ملے۔';
   const fallbackEnglishAction = '• No specific action items were identified.';
 
   return {
-    transcript_urdu: stripSpeakerTags(data.transcript_urdu || ''),
-    transcript_english: stripSpeakerTags(data.transcript_english || fallbackEnglish),
+    transcript_urdu: cleanTranscript(data.transcript_urdu || ''),
+    transcript_english: cleanTranscript(data.transcript_english || fallbackEnglish),
     action_items_urdu: stripSpeakerTags(data.action_items_urdu || fallbackUrduAction),
     action_items_english_improved: stripSpeakerTags(data.action_items_english_improved || fallbackEnglishAction)
   };
@@ -752,6 +793,7 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
   const clientGroqKey = req.headers['x-groq-api-key'] || req.body?.groqApiKey;
   const clientGeminiKey = req.headers['x-gemini-api-key'] || req.body?.geminiApiKey;
   const filePath = uploadedFile.path;
+  const speakerTimeline = parseSpeakerTimeline(req.body?.speakerTimeline);
 
   // Long recordings can take minutes to transcribe — respond immediately with a job id
   // so the client isn't stuck holding one long HTTP connection open, then process in
@@ -760,9 +802,9 @@ app.post(['/api/process-meeting', '/process-meeting'], upload.single('audio'), a
   audioJobs.set(jobId, { status: 'processing', createdAt: Date.now() });
   res.status(202).json({ success: true, jobId, status: 'processing' });
 
-  runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGroqKey)
-    .then((structuredOutput) => {
-      audioJobs.set(jobId, { status: 'done', data: sanitizePlainMeetingNotes(structuredOutput), createdAt: Date.now() });
+  runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGroqKey, speakerTimeline)
+    .then((notes) => {
+      audioJobs.set(jobId, { status: 'done', data: notes, createdAt: Date.now() });
     })
     .catch((err) => {
       console.error('[MeetScribe Audio Error]:', err, err.cause ? `\nCause: ${err.cause}` : '');
@@ -785,8 +827,11 @@ app.get('/api/job-status/:jobId', (req, res) => {
   return res.status(200).json({ success: true, ...job });
 });
 
-async function runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGroqKey) {
+// speakerTimeline (optional, from parseSpeakerTimeline) lets the Gemini audio path label
+// each dialogue turn with the real speaker name. Returns sanitized notes.
+async function runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGroqKey, speakerTimeline = null) {
     let structuredOutput = null;
+    let speakersLabeled = false;
     let lastTranscriptionError = null;
 
     const effectiveGeminiKey = normalizeApiKey(clientGeminiKey || process.env.GEMINI_API_KEY);
@@ -829,6 +874,13 @@ async function runAudioTranscriptionPipeline(filePath, clientGeminiKey, clientGr
 
       const audioModelCandidates = geminiModelCandidates();
 
+      const speakerLabelRule = speakerTimeline
+        ? 'Prefix every turn with its speaker name as described in rule 1.'
+        : 'Strictly NO speaker names or tags.';
+      const audioUserPrompt = speakerTimeline
+        ? `Please listen carefully to this meeting audio recording and generate the bilingual meeting notes according to the system instructions, labelling every transcript turn with its speaker name. Action items must not contain names. Return JSON only.\n\nSPEAKER TIMELINE (time from start of audio, then the speaker's name):\n${speakerTimeline.text}`
+        : `Please listen carefully to this meeting audio recording and generate the plain bilingual meeting notes (strictly excluding speaker names) according to the system instructions. Return JSON only.`;
+
       const audioSystemInstruction = `You are an expert bilingual Urdu and English executive scribe.
 Listen carefully to this meeting audio recording and produce a complete, verbatim Urdu/Urdish record, a faithful English translation, and concrete action items.
 
@@ -840,21 +892,27 @@ MEETING DOMAIN & VOCABULARY:
 - Do NOT mishear tech words as unrelated Arabic or random words (e.g. do NOT confuse "desktop / screen" with "موسیقی", do NOT confuse "UI" with "اوائی").
 
 MANDATORY RULES:
-1. STRICTLY ZERO SPEAKER LABELS OR TAGS:
+${speakerTimeline ? `1. SPEAKER NAMES ON EVERY DIALOGUE TURN (both transcripts only):
+   - You are given a SPEAKER TIMELINE captured from the meeting: time ranges (from the start of the audio) and the name of the person speaking.
+   - The timeline comes from live captions, so each range lags the real speech by roughly 1-3 seconds and may have small gaps. Use it together with the distinct voices you hear to decide who says each turn.
+   - Write each turn on its own line as "Name: spoken words". Start a new line whenever the speaker changes; merge consecutive speech by the same person into one turn.
+   - Use the names EXACTLY as written in the timeline (same spelling and script, in both the Urdu and the English transcript). Never invent, translate, or transliterate a name.
+   - If a voice cannot be matched to anyone in the timeline, label that turn "Unknown".
+   - The timeline tells you only WHO is speaking. Take the words exclusively from the audio.` : `1. STRICTLY ZERO SPEAKER LABELS OR TAGS:
    - Do NOT output "[Speaker]:", "[Speaker 1]:", "[Participant]:", "[Unknown]:", "[Name]:", or ANY prefix.
    - Every paragraph must start directly with the spoken words.
-   - Provide clean, continuous, natural plain content without attributing who said what.
+   - Provide clean, continuous, natural plain content without attributing who said what.`}
 
 2. VERBATIM URDU TRANSCRIPT (transcript_urdu):
    - Transcribe the entire spoken Urdu/Urdish conversation exactly as spoken in Urdu script (اردو رسم الخط / نستعلیق).
    - Do NOT correct Urdu grammar, paraphrase, polish, summarize, reorder, remove repetitions, or add information. Only add paragraph breaks and punctuation for readability.
-   - Strictly NO speaker names or tags.
+   - ${speakerLabelRule}
 
 3. FAITHFUL ENGLISH TRANSCRIPT (transcript_english):
    - Translate every spoken part faithfully into English, in the original order.
    - Correct only English grammar, spelling, and punctuation. Do NOT make the content professional, polished, shorter, clearer, or otherwise different from what was said.
    - Retain full technical domain accuracy and all relevant detail.
-   - Strictly NO speaker names or tags.
+   - ${speakerLabelRule}
 
 4. ACTION ITEMS WITHOUT NAMES (action_items_urdu & action_items_english_improved):
    - Extract only real, explicit tasks and decisions discussed in the audio; do not infer or invent any.
@@ -864,8 +922,8 @@ MANDATORY RULES:
 
 OUTPUT JSON (strict schema, no extra keys):
 {
-  "transcript_urdu": "Verbatim Urdu/Urdish conversation in Urdu script without speaker names.",
-  "transcript_english": "Faithful English translation with grammar corrected only, without speaker names.",
+  "transcript_urdu": "Verbatim Urdu/Urdish conversation in Urdu script ${speakerTimeline ? 'with a Name: prefix on each turn' : 'without speaker names'}.",
+  "transcript_english": "Faithful English translation with grammar corrected only, ${speakerTimeline ? 'with a Name: prefix on each turn' : 'without speaker names'}.",
   "action_items_urdu": "Bullet list of real tasks in Urdu without person names, or empty state.",
   "action_items_english_improved": "Bullet list of real tasks in English without person names, or empty state."
 }`;
@@ -886,7 +944,7 @@ OUTPUT JSON (strict schema, no extra keys):
           const result = await retryTransientProviderRequest(
             `[MeetScribe Audio] Gemini Audio (${modelName})`,
             () => model.generateContent([
-              `Please listen carefully to this meeting audio recording and generate the plain bilingual meeting notes (strictly excluding speaker names) according to the system instructions. Return JSON only.`,
+              audioUserPrompt,
               audioPart
             ])
           );
@@ -916,6 +974,7 @@ OUTPUT JSON (strict schema, no extra keys):
 
           if (parsedData && (parsedData.transcript_urdu || parsedData.transcript_english)) {
             structuredOutput = parsedData;
+            speakersLabeled = Boolean(speakerTimeline);
             console.log(`[MeetScribe Audio] Direct Gemini Audio (${modelName}) succeeded ✓`);
             break;
           }
@@ -987,7 +1046,7 @@ OUTPUT JSON (strict schema, no extra keys):
       }
     }
 
-    return structuredOutput;
+    return sanitizePlainMeetingNotes(structuredOutput, { keepSpeakerLabels: speakersLabeled });
 }
 
 /**

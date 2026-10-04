@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**MeetScribe Urdu** is a Chrome Manifest V3 extension + Express.js backend that captures Google Meet live captions and tab audio, then uses Google Gemini AI (with Groq Whisper as fallback) to generate bilingual Urdu/English meeting notes — strictly without speaker names.
+**MeetScribe Urdu** is a Chrome Manifest V3 extension + Express.js backend that captures Google Meet live captions and tab audio, then uses Google Gemini AI (with Groq Whisper as fallback) to generate bilingual Urdu/English meeting notes. Transcripts label each turn with the speaker's name; action items never carry names.
 
 # Claude Code Rules
 
@@ -56,7 +56,6 @@ Both API keys (Gemini + Groq) must be configured before starting a recording —
 meet-scribe-extension/
 ├── backend/          # Express.js Node server
 │   ├── server.js     # All API routes + Gemini/Groq AI logic
-│   └── vercel.json   # Serverless deployment config
 └── extension/        # Chrome MV3 extension
     ├── manifest.json
     ├── background.js  # Service worker — pipeline coordinator
@@ -72,7 +71,7 @@ meet-scribe-extension/
 2. **background.js** (service worker) acquires `streamId` via `chrome.tabCapture`, opens the offscreen document, and relays `START_OFFSCREEN_RECORDING`
 3. **offscreen.js** captures tab audio + microphone simultaneously, mixes them with DSP (high-pass filter + compressor), and encodes as Opus WebM via `MediaRecorder`
 4. On stop: offscreen downloads `0_meeting_audio.webm` immediately to disk, then sends audio to backend
-5. **background.js** dynamically discovers the backend URL from `CANDIDATE_BACKEND_URLS` (`localhost:3001` → `localhost:3000` → Vercel fallback)
+5. **background.js** dynamically discovers the backend URL from `CANDIDATE_BACKEND_URLS` (`localhost:3001` → `localhost:3000` → Render fallback)
 6. **server.js** processes audio: Gemini multimodal audio (primary) → Groq Whisper STT + Gemini text formatting (fallback)
 7. Background downloads 4 organized UTF-8 text files into `Downloads/MeetScribe_Urdu/Meeting_[timestamp]/`
 
@@ -86,7 +85,7 @@ meet-scribe-extension/
 ### Extension Key Behaviors
 
 - **content.js** scrapes Google Meet CC panels using strict DOM selectors — explicitly rejects notification toasts to avoid hardware names leaking in
-- **background.js** auto-enables Google Meet CC when recording starts
+- **content.js** auto-enables Google Meet CC when recording starts and switches it back off on stop. **Known limitation:** captions stay visible to the user for the whole recording — they are the only source of speaker names, and Meet reserves the caption area in its own layout logic, so hiding the panel just leaves an empty strip. The CC button is locked while recording and captions are re-enabled within a second if switched off (e.g. via the `c` shortcut)
 - **offscreen.js** routes tab audio to `AudioContext.destination` so the user can still hear participants during recording
 - Backend URL discovery is dynamic: tries stored URL first, then `CANDIDATE_BACKEND_URLS` in order
 
@@ -103,7 +102,7 @@ Downloads/MeetScribe_Urdu/Meeting_YYYY-MM-DD_HH-MM/
 
 ## Key Constraints & Guardrails
 
-- **No speaker names** in any output — `stripSpeakerTags()` in server.js enforces this via regex post-processing
+- **Speaker names only in the two transcripts** — content.js keeps Meet captions on (visible) to build a who-spoke-when timeline, which the Gemini audio prompt uses to prefix each turn with `Name:`. Action items never carry names, and transcripts fall back to no names when there is no timeline (manual uploads, Groq fallback) — `stripSpeakerTags()` in server.js enforces both
 - **Urdu language guardrails**: All Gemini prompts explicitly specify Pakistani/Indian Urdu (نستعلیق), not Arabic, with tech vocabulary examples to prevent mishearing (e.g., "UI" must not become "اوائی")
 - **Whisper hallucination scrubbing**: Common silence hallucinations ("Thank you for watching", etc.) are stripped from Groq Whisper output
 - **500MB audio upload limit** enforced by multer; temp files are always deleted after processing (`finally` block)

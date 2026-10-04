@@ -181,11 +181,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (e) {}
 
         // 6. Start Offscreen local audio recording (with AEC & Noise Cancellation)
+        // backendUrl lets the offscreen document keep a cloud (Render) backend awake while recording
+        const { backendUrl: keepAliveUrl = '' } = await chrome.storage.local.get('backendUrl');
         await chrome.runtime.sendMessage({
           type: 'START_OFFSCREEN_RECORDING',
           streamId: streamId,
-          initialMuteState: initialMuteState
+          initialMuteState: initialMuteState,
+          backendUrl: keepAliveUrl
         });
+
+        // 6b. Track who is speaking when (hidden Meet captions) so transcripts can carry names
+        await chrome.storage.local.remove('speakerTimeline');
+        try {
+          const { userFullName = '' } = await chrome.storage.local.get('userFullName');
+          await chrome.tabs.sendMessage(tab.id, { type: 'START_CAPTIONS_CAPTURE', selfName: userFullName });
+        } catch (capErr) {
+          console.warn('[Background] Could not start speaker tracking (transcript will have no names):', capErr.message);
+        }
 
         // 7. Update UI state & badge
         const startTime = Date.now();
@@ -215,6 +227,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         await chrome.action.setBadgeText({ text: 'AI...' });
         await chrome.action.setBadgeBackgroundColor({ color: '#3B82F6' });
+
+        // Step 0: Collect the speaker timeline from the Meet tab (falls back to the copy the
+        // content script persists, in case the tab was closed before Stop was clicked)
+        let speakerTimeline = [];
+        try {
+          const { activeTabId } = await chrome.storage.local.get('activeTabId');
+          if (activeTabId) {
+            const capRes = await chrome.tabs.sendMessage(activeTabId, { type: 'STOP_CAPTIONS_CAPTURE' });
+            if (capRes && Array.isArray(capRes.speakerTimeline)) speakerTimeline = capRes.speakerTimeline;
+          }
+        } catch (capErr) {
+          console.warn('[Background] Could not reach Meet tab for speaker timeline:', capErr.message);
+        }
+        if (speakerTimeline.length === 0) {
+          const saved = await chrome.storage.local.get('speakerTimeline');
+          if (Array.isArray(saved.speakerTimeline)) speakerTimeline = saved.speakerTimeline;
+        }
+        await chrome.storage.local.remove('speakerTimeline');
+        console.log(`[Background] Speaker timeline: ${speakerTimeline.length} turns.`);
 
         // Step 1: Stop offscreen audio recorder and trigger INSTANT local 0_meeting_audio.webm download
         let folderName = '';
@@ -254,7 +285,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             type: 'PROCESS_AUDIO',
             backendUrl: activeUrl,
             geminiApiKey: geminiApiKey,
-            groqApiKey: groqApiKey
+            groqApiKey: groqApiKey,
+            speakerTimeline: speakerTimeline
           });
 
           if (audioRes && audioRes.success && audioRes.data) {
@@ -265,13 +297,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         } catch (audioErr) {
           // Don't bolt on a generic "check your API key" hint when the real cause is
-          // something else (payload size, connectivity) — it sends users troubleshooting
+          // something else (connectivity) — it sends users troubleshooting
           // the wrong thing.
           const msg = audioErr.message || 'Unknown error';
           let hint = '';
-          if (/too large|4\.5mb|payload/i.test(msg)) {
-            hint = ' Run the backend locally for full-length meetings, or keep recordings under ~15-18 minutes when using the free cloud backend.';
-          } else if (/could not reach|could not connect|fetch|network/i.test(msg)) {
+          if (/could not reach|could not connect|fetch|network/i.test(msg)) {
             hint = ' Please ensure the backend is running (npm start in the backend folder) or that your internet connection is working.';
           } else if (/api key|unauthorized|permission|quota/i.test(msg)) {
             hint = ' Please verify your Gemini API Key in Settings (⚙️).';
@@ -303,6 +333,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }, 10000);
 
         sendResponse({ success: true, data: structuredData });
+
+      } else if (message.type === 'OFFSCREEN_STATUS_UPDATE') {
+        if (message.step) {
+          await chrome.storage.local.set({ processingStep: message.step });
+        }
+        sendResponse({ received: true });
 
       } else if (message.type === 'EXECUTE_DOWNLOAD') {
         const { filename, url } = message;
