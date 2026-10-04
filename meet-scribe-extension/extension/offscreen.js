@@ -370,7 +370,7 @@ async function pollAudioJob(baseUrl, jobId, headers) {
 }
 
 // Process audio recording with AI backend (primary pipeline)
-async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
+async function processAudio(backendUrl, geminiApiKey, groqApiKey, speakerTimeline = []) {
   if (!lastCompiledAudioBlob || lastCompiledAudioBlob.size === 0) {
     throw new Error('No audio recording available for AI transcription.');
   }
@@ -404,6 +404,7 @@ async function processAudio(backendUrl, geminiApiKey, groqApiKey) {
     formData.append('audio', lastCompiledAudioBlob, 'meeting_audio.webm');
     if (geminiApiKey) formData.append('geminiApiKey', geminiApiKey);
     if (groqApiKey) formData.append('groqApiKey', groqApiKey);
+    if (speakerTimeline.length > 0) formData.append('speakerTimeline', JSON.stringify(speakerTimeline));
 
     console.log(`[Offscreen Audio] Sending audio recording (${audioSizeMB} MB) to ${cleanUrl}/api/process-meeting...`);
 
@@ -479,7 +480,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
 
   } else if (message.type === 'PROCESS_AUDIO' || message.type === 'PROCESS_AUDIO_FALLBACK') {
-    processAudio(message.backendUrl, message.geminiApiKey, message.groqApiKey)
+    processAudio(message.backendUrl, message.geminiApiKey, message.groqApiKey, message.speakerTimeline || [])
       .then(res => sendResponse(res))
       .catch(err => {
         console.error('[Offscreen] Audio processing error:', err);

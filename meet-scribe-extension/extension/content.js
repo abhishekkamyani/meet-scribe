@@ -32,6 +32,22 @@ let captionSegments = new Map();   // live, in-progress segments
 let captionsHistory = [];          // finalized, complete utterances
 let lastSnapshotKey = '';          // hash of last DOM snapshot to avoid redundant work
 
+/**
+ * speakerTimeline: [{ speaker, start, end }] in ms since recording start.
+ *
+ * The audio AI produces the words; Meet's caption labels are only used to know WHO
+ * was speaking WHEN, so the backend can attach real names to each dialogue turn.
+ */
+let speakerTimeline = [];
+let captureStartMs = 0;
+let captionsPoll = null;
+let pollTicks = 0;
+let timelineDirty = false;
+let ccEnabledByUs = false;
+let lastTextByBlock = new WeakMap();   // caption block element -> last text seen
+const SAME_TURN_GAP_MS = 4000;
+const SELF_LABELS = ['you', 'آپ', 'me'];
+
 /* ── Context guard ──────────────────────────────────────────────────────── */
 function isContextValid() {
   return typeof chrome !== 'undefined' && chrome.runtime && Boolean(chrome.runtime.id);
@@ -51,29 +67,40 @@ function cleanUpScript() {
   if (pollInterval)     { clearInterval(pollInterval);                       pollInterval     = null; }
   if (debounceTimeout)  { clearTimeout(debounceTimeout);                     debounceTimeout  = null; }
   if (captionsDebounce) { clearTimeout(captionsDebounce);                    captionsDebounce = null; }
+  if (captionsPoll)     { clearInterval(captionsPoll);                       captionsPoll     = null; }
+  try { setCcButtonLocked(false); } catch (e) {}
   removeCaptionsOverlayStyle();
 }
 
-/* ── CC overlay style (keeps video full-screen when CC is on) ───────────── */
-function injectCaptionsOverlayStyle() {
-  if (document.getElementById('meetscribe-captions-overlay-style')) return;
-  const s = document.createElement('style');
-  s.id = 'meetscribe-captions-overlay-style';
-  // Hide the captions UI from the user completely while keeping the DOM alive for scraping.
-  // opacity:0 + pointer-events:none makes the element invisible but still present in the DOM tree.
-  s.textContent = `
-    div[jsname="YSxPtf"], div[jsname="tgaKEf"], div.a4cQT, div.bh44bd,
-    [role="region"][aria-label*="caption" i], [role="region"][aria-label*="subtitle" i] {
-      opacity: 0 !important;
-      pointer-events: none !important;
-      user-select: none !important;
-    }`;
-  document.head.appendChild(s);
-}
+/* ── Caption visibility ─────────────────────────────────────────────────── */
+// Captions stay visible while recording: Meet reserves the caption area in its own layout
+// logic, so hiding the panel only leaves an empty strip. This just clears styles left by
+// older versions of the extension.
 function removeCaptionsOverlayStyle() {
   ['meetscribe-captions-overlay-style','meetscribe-hide-captions-style','meetscribe-stealth-style']
     .forEach(id => { const el = document.getElementById(id); if (el) el.remove(); });
   document.body.classList.remove('meetscribe-hide-captions','meetscribe-stealth-active');
+}
+
+// Speaker names come only from live captions, so the CC button is locked while recording.
+// (The "c" keyboard shortcut still works; the poll below switches captions straight back on.)
+const CC_LOCK_PROPS = [['pointer-events', 'none'], ['opacity', '0.5']];
+
+function setCcButtonLocked(locked) {
+  const btn = findCcToggleButton();
+  if (!btn) return;
+  if (locked) {
+    if (btn.hasAttribute('data-meetscribe-locked')) return;
+    btn.setAttribute('data-meetscribe-locked', '1');
+    btn.setAttribute('title', 'Captions are required while MeetScribe is recording (used for speaker names)');
+    CC_LOCK_PROPS.forEach(([prop, value]) => btn.style.setProperty(prop, value, 'important'));
+  } else {
+    document.querySelectorAll('[data-meetscribe-locked]').forEach(el => {
+      el.removeAttribute('data-meetscribe-locked');
+      el.removeAttribute('title');
+      CC_LOCK_PROPS.forEach(([prop]) => el.style.removeProperty(prop));
+    });
+  }
 }
 
 /* ── CC Button Auto-Enable ──────────────────────────────────────────────── */
@@ -134,18 +161,22 @@ function findCcToggleButton() {
   return null;
 }
 
-function ensureCaptionsEnabled() {
+function isCcButtonOn(btn) {
+  return btn.getAttribute('aria-pressed') === 'true' ||
+    (btn.getAttribute('aria-label') || '').toLowerCase().includes('turn off') ||
+    (btn.getAttribute('data-tooltip') || '').toLowerCase().includes('turn off');
+}
+
+function ensureCaptionsEnabled(allowKeyboardFallback = true) {
   try {
     const btn = findCcToggleButton();
     if (btn) {
-      const isOn = btn.getAttribute('aria-pressed') === 'true' ||
-        (btn.getAttribute('aria-label') || '').toLowerCase().includes('turn off') ||
-        (btn.getAttribute('data-tooltip') || '').toLowerCase().includes('turn off');
-      if (!isOn) {
+      if (!isCcButtonOn(btn)) {
         console.log('[MeetScribe] Auto-enabling Google Meet CC via button…');
         btn.click();
+        ccEnabledByUs = true;
       }
-    } else {
+    } else if (allowKeyboardFallback) {
       // Fallback: Dispatch Meet shortcut 'c' to toggle captions
       console.log('[MeetScribe] CC button not found directly, trying shortcut "c"…');
       toggleCcViaKeyboard();
@@ -337,6 +368,12 @@ function processCaptionsDOM() {
 
       if (!text || text.length < 2) return;
 
+      // Growing/changed text in a block means its speaker is talking right now
+      if (lastTextByBlock.get(block) !== text) {
+        lastTextByBlock.set(block, text);
+        noteSpeakerActivity(resolveBlockSpeaker(block));
+      }
+
       // Deduplicate text that is clearly just a speaker label repeated as text
       if (text.toLowerCase() === speaker.toLowerCase()) return;
 
@@ -374,6 +411,41 @@ function processCaptionsDOM() {
   }
 }
 
+/* ── Speaker timeline ───────────────────────────────────────────────────── */
+// Meet labels the local user's own captions "You", so map that to their real name
+function resolveBlockSpeaker(block) {
+  const label = extractSpeakerFromBlock(block);
+  if (label) return label;
+  const firstLine = (block.innerText || '').split('\n')[0].trim().toLowerCase();
+  if (SELF_LABELS.includes(firstLine)) return discoveredSelfName || 'You';
+  return '';
+}
+
+function noteSpeakerActivity(speaker) {
+  if (!speaker || ['participant', 'speaker'].includes(speaker.toLowerCase())) return;
+  const t = Math.max(0, Date.now() - captureStartMs);
+
+  // Extend this speaker's recent turn if there is one (look back a few entries so
+  // two people talking over each other don't create a new entry on every update)
+  for (let i = speakerTimeline.length - 1; i >= 0 && i >= speakerTimeline.length - 4; i--) {
+    const entry = speakerTimeline[i];
+    if (entry.speaker === speaker && t - entry.end <= SAME_TURN_GAP_MS) {
+      entry.end = t;
+      timelineDirty = true;
+      return;
+    }
+  }
+  speakerTimeline.push({ speaker, start: t, end: t });
+  timelineDirty = true;
+}
+
+// Persisted periodically so the timeline survives the Meet tab being closed before Stop
+function persistSpeakerTimeline() {
+  if (!timelineDirty || !isContextValid()) return;
+  timelineDirty = false;
+  try { chrome.storage.local.set({ speakerTimeline }); } catch (e) {}
+}
+
 /* ── Flush a completed segment into captionsHistory ─────────────────────── */
 function flushSegmentToHistory(seg) {
   const { speaker, text, timestamp } = seg;
@@ -407,16 +479,35 @@ function flushSegmentToHistory(seg) {
 
 /* ── Observer lifecycle ──────────────────────────────────────────────────── */
 function startCaptionsObserver() {
-  // Captions observer disabled in favor of direct high-definition audio AI processing
-  isCapturingCaptions = false;
-  console.log('[MeetScribe] Direct audio recording active (CC scraping bypassed) ✓');
+  // Captions are switched on (and kept on) purely to learn who is speaking when;
+  // the transcript text itself still comes from the audio AI.
+  captureStartMs = Date.now();
+  isCapturingCaptions = true;
+  ccEnabledByUs = false;
+  pollTicks = 0;
+  ensureCaptionsEnabled();
+
+  if (captionsPoll) clearInterval(captionsPoll);
+  captionsPoll = setInterval(() => {
+    if (!isContextValid()) { cleanUpScript(); return; }
+    pollTicks++;
+    // Re-enable captions within a second if they get switched off, or once the call is
+    // joined (button only, never the keyboard toggle, which could switch them back off)
+    if (pollTicks % 4 === 0) {
+      if (!findCaptionContainer()) ensureCaptionsEnabled(false);
+      setCcButtonLocked(true);
+    }
+    processCaptionsDOM();
+    if (pollTicks % 40 === 0) persistSpeakerTimeline();
+  }, 250);
+  console.log('[MeetScribe] Caption tracking active (speaker names only) ✓');
 }
 
 function stopCaptionsObserver() {
   isCapturingCaptions = false;
   if (captionsObserver) { try { captionsObserver.disconnect(); } catch(e){} captionsObserver = null; }
   if (captionsDebounce) { clearTimeout(captionsDebounce); captionsDebounce = null; }
-  removeCaptionsOverlayStyle();
+  if (captionsPoll) { clearInterval(captionsPoll); captionsPoll = null; }
 
   // Flush any still-live segments that were on screen when Stop was clicked
   for (const [, seg] of captionSegments) {
@@ -426,7 +517,18 @@ function stopCaptionsObserver() {
 
   // Final scan
   processCaptionsDOM();
-  return getFormattedCaptions();
+
+  // Leave Meet the way we found it: unlock the CC button and switch captions back off
+  setCcButtonLocked(false);
+  if (ccEnabledByUs) {
+    try {
+      const btn = findCcToggleButton();
+      if (btn && isCcButtonOn(btn)) btn.click();
+    } catch (e) {}
+    ccEnabledByUs = false;
+  }
+
+  return { ...getFormattedCaptions(), speakerTimeline };
 }
 
 /* ── Format final transcript ─────────────────────────────────────────────── */
@@ -648,6 +750,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     captionsHistory = [];
     uniqueSpeakersSet.clear();
     lastSnapshotKey = '';
+    speakerTimeline = [];
+    if (typeof message.selfName === 'string' && message.selfName.trim()) {
+      discoveredSelfName = message.selfName.trim();   // user-provided name wins over auto-detection
+    }
+    lastTextByBlock = new WeakMap();
+    timelineDirty = false;
     startCaptionsObserver();
     sendResponse({ success: true });
     return true;

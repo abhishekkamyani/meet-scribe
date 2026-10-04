@@ -190,6 +190,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           backendUrl: keepAliveUrl
         });
 
+        // 6b. Track who is speaking when (hidden Meet captions) so transcripts can carry names
+        await chrome.storage.local.remove('speakerTimeline');
+        try {
+          const { userFullName = '' } = await chrome.storage.local.get('userFullName');
+          await chrome.tabs.sendMessage(tab.id, { type: 'START_CAPTIONS_CAPTURE', selfName: userFullName });
+        } catch (capErr) {
+          console.warn('[Background] Could not start speaker tracking (transcript will have no names):', capErr.message);
+        }
+
         // 7. Update UI state & badge
         const startTime = Date.now();
         await chrome.storage.local.set({
@@ -218,6 +227,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         await chrome.action.setBadgeText({ text: 'AI...' });
         await chrome.action.setBadgeBackgroundColor({ color: '#3B82F6' });
+
+        // Step 0: Collect the speaker timeline from the Meet tab (falls back to the copy the
+        // content script persists, in case the tab was closed before Stop was clicked)
+        let speakerTimeline = [];
+        try {
+          const { activeTabId } = await chrome.storage.local.get('activeTabId');
+          if (activeTabId) {
+            const capRes = await chrome.tabs.sendMessage(activeTabId, { type: 'STOP_CAPTIONS_CAPTURE' });
+            if (capRes && Array.isArray(capRes.speakerTimeline)) speakerTimeline = capRes.speakerTimeline;
+          }
+        } catch (capErr) {
+          console.warn('[Background] Could not reach Meet tab for speaker timeline:', capErr.message);
+        }
+        if (speakerTimeline.length === 0) {
+          const saved = await chrome.storage.local.get('speakerTimeline');
+          if (Array.isArray(saved.speakerTimeline)) speakerTimeline = saved.speakerTimeline;
+        }
+        await chrome.storage.local.remove('speakerTimeline');
+        console.log(`[Background] Speaker timeline: ${speakerTimeline.length} turns.`);
 
         // Step 1: Stop offscreen audio recorder and trigger INSTANT local 0_meeting_audio.webm download
         let folderName = '';
@@ -257,7 +285,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             type: 'PROCESS_AUDIO',
             backendUrl: activeUrl,
             geminiApiKey: geminiApiKey,
-            groqApiKey: groqApiKey
+            groqApiKey: groqApiKey,
+            speakerTimeline: speakerTimeline
           });
 
           if (audioRes && audioRes.success && audioRes.data) {

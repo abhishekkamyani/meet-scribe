@@ -24,6 +24,7 @@ const elements = {
   statusText: document.getElementById('status-text'),
   toggleSettingsBtn: document.getElementById('toggle-settings-btn'),
   settingsPanel: document.getElementById('settings-panel'),
+  userNameInput: document.getElementById('user-name-input'),
   groqApiKeyInput: document.getElementById('groq-api-key-input'),
   geminiApiKeyInput: document.getElementById('gemini-api-key-input'),
   toggleGroqKeyBtn: document.getElementById('toggle-groq-key-btn'),
@@ -149,7 +150,8 @@ function updateAPIKeyStatus(groqKey, geminiKey) {
 // Initialize Popup
 document.addEventListener('DOMContentLoaded', async () => {
   // 1. Load saved settings (API keys)
-  const savedData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey']);
+  const savedData = await chrome.storage.local.get(['groqApiKey', 'geminiApiKey', 'userFullName']);
+  if (elements.userNameInput && savedData.userFullName) elements.userNameInput.value = savedData.userFullName;
   
   userGroqKey = savedData.groqApiKey || '';
   userGeminiKey = savedData.geminiApiKey || '';
@@ -416,7 +418,8 @@ function setupEventListeners() {
 
     await chrome.storage.local.set({
       groqApiKey: groqKey,
-      geminiApiKey: geminiKey
+      geminiApiKey: geminiKey,
+      userFullName: elements.userNameInput.value.trim()
     });
 
     userGroqKey = groqKey;
@@ -452,6 +455,24 @@ function setupEventListeners() {
       else elements.groqApiKeyInput.focus();
       return;
     }
+
+    // Your own name is needed to label your turns in the transcripts (Meet's captions only say "You")
+    let userFullName = elements.userNameInput.value.trim();
+    if (!userFullName && activeMeetTabId) {
+      try {
+        const res = await chrome.tabs.sendMessage(activeMeetTabId, { type: 'GET_MEET_PARTICIPANTS' });
+        userFullName = (res && res.participants && res.participants.selfName) || '';
+        if (userFullName) elements.userNameInput.value = userFullName;
+      } catch (e) {}
+    }
+    if (!userFullName) {
+      showView('error');
+      elements.errorMessageText.textContent = 'Please enter your full name (as shown to others in Google Meet) in Settings (⚙️) so your speech can be labelled in the transcripts.';
+      elements.settingsPanel.classList.remove('hidden');
+      elements.userNameInput.focus();
+      return;
+    }
+    await chrome.storage.local.set({ userFullName });
 
     const micGranted = await ensureMicrophonePermission(true);
     if (!micGranted) return;
